@@ -1,0 +1,58 @@
+# ---- Secrets -------------------------------------------------------------
+# Never commit. If a key is ever committed: ROTATE IT FIRST, then clean history.
+.env
+.env.local
+*.key
+.secret_key
+
+# ---- Data ----------------------------------------------------------------
+# SQLite holds encrypted API keys, client glossaries and job history.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ---- Models --------------------------------------------------------------
+# ~4 GB of weights. Lives on the large drive, set via MODELS_DIR in .env.
+models/
+*.onnx
+*.pth
+*.safetensors
+
+# ---- Python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# ---- Frontend ------------------------------------------------------------
+# node_modules never ships. dist/ is built output — see the note below.
+node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+
+# ---- Working files -------------------------------------------------------
+# Client artwork must not accumulate in the repo.
+tmp/
+temp/
+uploads/
+output/
+
+# ---- OS / editor ---------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+
+
+# NOTE on frontend/dist/
+# Ignored during development. At release time the built UI must reach the shop
+# PC, which has no Node. Ship it as a release artifact, or force-add it on a
+# release commit (`git add -f frontend/dist`). See README.md → For developers.
+.claude/settings.local.json

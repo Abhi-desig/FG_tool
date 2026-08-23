@@ -1,0 +1,71 @@
+# Golden pairs: Unicode Malayalam  ->  ML-TTKarthika ASCII
+#
+# unicode <TAB> ascii <TAB> what it covers
+#
+# The first two are VERIFIED against the libindic/payyans README, which
+# publishes them as worked examples. Everything else was hand-derived from
+# data/maps/ML-TTKarthika.map and cross-checked against payyans (see
+# test_fonts.py::test_matches_payyans, which runs when payyans is installed).
+#
+# ROADMAP.md Phase 1 exit gate needs 25 of these passing PLUS a visual check
+# in CorelDRAW. A green suite here proves the encoding is self-consistent;
+# only the font can prove the glyphs are right.
+
+മലയാളം	aebmfw	VERIFIED payyans README — simple consonants + post-base vowel
+കേരളം	tIcfw	VERIFIED payyans README — pre-base vowel reorder (േ moves before ക)
+
+# --- pre-base vowel signs: the glyph precedes the consonant ---
+കെ	sI	െ alone
+കേ	tI	േ alone
+കൈ	ssI	ൈ alone
+ചെറിയ	sNdnb	െ mid-word
+സ്നേഹം	kvt\lw	േ after an explicit virama
+
+# --- split vowel signs: a glyph on each side of the consonant ---
+കൊ	sIm	ൊ splits into s + I + m
+കോ	tIm	ോ splits into t + I + m
+കൌ	sIu	ൌ splits into s + I + u
+കൊച്ചി	sImšn	split vowel + conjunct + post-base vowel
+പോക്ക്	t]m¡v	split vowel + conjunct + virama
+മൊബൈൽ	samss_Â	split vowel, then pre-base ൈ, then chillu
+
+# --- conjuncts: one ligature glyph, not consonant+virama+consonant ---
+അമ്മ	Aœ	മ്മ — first-wins over the ½ alternate
+ന്ന	¶	ന്ന — must NOT be ∂ (U+2202 cannot exist in an 8-bit font)
+പൂച്ച	]qš	ച്ച
+ഉപ്പ്	D¸v	പ്പ + virama
+ബസ്സ്	_Êv	സ്സ + virama
+അച്ഛൻ	AÑ³	ച്ഛ + chillu
+സ്റ്റേഷൻ	tÌj³	സ്റ്റ is a 5-codepoint ligature — proves longest-match
+ക്ഷേത്രം	t£{Xw	ക്ഷ + pre-base േ + pre-base ്ര
+
+# --- chillu letters ---
+ഞാൻ	Rm³	ൻ
+അവൾ	AhÄ	ൾ
+വർഷം	hÀjw	ർ
+നല്ല	\Ã	ല്ല ligature
+
+# --- post-base consonant signs ---
+ഇന്ത്യ	C´y	ന്ത conjunct + ്യ sign
+വിദ്യ	hnZy	്യ sign
+ഗ്രാമം	{Kmaw	്ര is PRE-base — flagged for the CorelDRAW check
+ശ്രീ	{io	്ര + ീ
+ആശുപത്രി	Bip]{Xn	്ര mid-word
+
+# --- vowel+consonant ligatures ---
+ഒരു	Hê	രു ligature
+കുട്ടി	æ«n	കു ligature + ട്ട conjunct
+
+# --- independent vowels ---
+ഐക്യം	sFIyw	ഐ is the 2-char code sF, NOT the sign െ applied to എ
+ഔഷധം	Huj[w	ഔ is Hu
+ഓണം	HmWw	ഓ is Hm
+കൃഷി	Irjn	ൃ vowel sign
+
+# --- everyday words ---
+വീട്	hoSv	house
+തറ	Xd	floor
+ഭാഷ	`mj	language
+പുസ്തകം	]pkvXIw	book
+നമസ്കാരം	\akvImcw	greeting
+തിരുവനന്തപുരം	Xnêh\´]pcw	place name, long

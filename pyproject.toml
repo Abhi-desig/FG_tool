@@ -1,0 +1,78 @@
+[project]
+name = "focus-toolkit"
+version = "0.1.0"
+description = "Local pre-press assistant for a Kerala printing and advertising shop"
+requires-python = ">=3.13,<3.14"
+
+# Phase 1 only. Deliberately tiny — see ARCHITECTURE.md.
+dependencies = [
+    "fastapi>=0.141.0",
+    "uvicorn[standard]>=0.34.0",
+    "pydantic>=2.10",
+    "python-dotenv>=1.0",
+    # File uploads. main.py always mounts the image routes, so this is base.
+    "python-multipart>=0.0.21",
+]
+
+# Installed per phase so the font converter never pulls down 3.5 GB.
+#   uv sync --extra images
+[project.optional-dependencies]
+images = [
+    "rembg>=2.0.81",
+    "onnxruntime>=1.29.0",
+    "pillow>=12.0",
+]
+translate = [
+    "torch>=2.13",
+    "transformers>=5.15",
+    # Marian and IndicTrans2 tokenizers are sentencepiece-based. Without these
+    # transformers reports "Unrecognized configuration class", which is
+    # misleading — the config IS supported, the tokenizer backend is missing.
+    "sentencepiece>=0.2",
+    "protobuf>=5.0",
+    # Marian detokenisation; without it transformers warns and output is rougher.
+    "sacremoses>=0.1",
+    "openpyxl>=3.1.5",
+]
+
+# IndicTrans2 needs its own toolkit, which is broken against transformers 5.x
+# (imports PreTrainedTokenizerBase from a module it no longer lives in). Kept
+# separate so the working translator is not held hostage to it. See ADR-017.
+indictrans = [
+    "IndicTransToolkit>=1.1.1",
+    "transformers<5",
+]
+ai = [
+    "google-genai>=2.19.0",
+    "keyring>=25.0",
+    "cryptography>=44.0",
+]
+
+# `translate` and `indictrans` deliberately pin different transformers majors
+# and are never installed together. Declaring the conflict lets uv lock both.
+[tool.uv]
+conflicts = [[{ extra = "translate" }, { extra = "indictrans" }]]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "httpx>=0.28",
+    "ruff>=0.9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]

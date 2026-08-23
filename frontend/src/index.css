@@ -1,0 +1,178 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Design tokens — the single source of truth. DESIGN.md forbids hardcoding a
+   colour or spacing value in a component.
+   These are shadcn's own variable names carrying our palette, so every shadcn
+   component inherits the design system with no per-component overrides. */
+
+:root {
+  --radius: 0.5rem;
+
+  /* Neutral slate base, so client artwork is judged against a background that
+     does not compete with it. */
+  --background: #fbfbfd;
+  --foreground: #16161d;
+  --card: #ffffff;
+  --card-foreground: #16161d;
+  --popover: #ffffff;
+  --popover-foreground: #16161d;
+
+  --primary: #3b5bdb;
+  --primary-foreground: #ffffff;
+  --secondary: #f4f4f7;
+  --secondary-foreground: #16161d;
+  --muted: #f4f4f7;
+  --muted-foreground: #6b6b7b;
+  --accent: #eef1fd;
+  --accent-foreground: #2f4bc4;
+  --destructive: #b42318;
+
+  --border: #e3e3e9;
+  --input: #e3e3e9;
+  --ring: #3b5bdb;
+
+  /* Verdict colours. Phase 2's DPI answer depends on these; Phase 1 uses them
+     for the conversion result state. */
+  --ok: #157f3d;
+  --warn: #a16207;
+
+  --sidebar: #f4f4f7;
+  --sidebar-foreground: #16161d;
+  --sidebar-primary: #3b5bdb;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #eef1fd;
+  --sidebar-accent-foreground: #2f4bc4;
+  --sidebar-border: #e3e3e9;
+  --sidebar-ring: #3b5bdb;
+}
+
+.dark {
+  --background: #101014;
+  --foreground: #f2f2f5;
+  --card: #18181e;
+  --card-foreground: #f2f2f5;
+  --popover: #18181e;
+  --popover-foreground: #f2f2f5;
+
+  --primary: #7b93f5;
+  --primary-foreground: #101014;
+  --secondary: #202028;
+  --secondary-foreground: #f2f2f5;
+  --muted: #202028;
+  --muted-foreground: #9a9aab;
+  --accent: #21243a;
+  --accent-foreground: #b9c6fb;
+  --destructive: #f87171;
+
+  --border: #2e2e38;
+  --input: #2e2e38;
+  --ring: #7b93f5;
+
+  --ok: #4ade80;
+  --warn: #fbbf24;
+
+  --sidebar: #18181e;
+  --sidebar-foreground: #f2f2f5;
+  --sidebar-primary: #7b93f5;
+  --sidebar-primary-foreground: #101014;
+  --sidebar-accent: #21243a;
+  --sidebar-accent-foreground: #b9c6fb;
+  --sidebar-border: #2e2e38;
+  --sidebar-ring: #7b93f5;
+}
+
+/* Bundled so the UI never depends on the shop machine's fonts. A missing glyph
+   would make correct output look broken and destroy trust in the converter.
+   Noto Sans Malayalam, OFL — see LICENSES.md. */
+@font-face {
+  font-family: "Noto Sans Malayalam";
+  src: url("/fonts/NotoSansMalayalam.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@theme inline {
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-sans);
+  --font-malayalam: "Noto Sans Malayalam", var(--font-sans);
+  --font-glyph: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    color-scheme: light dark;
+    @apply font-sans;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-size: 15px;
+  }
+
+  /* Malayalam needs more leading than Latin. */
+  .malayalam {
+    font-family: var(--font-malayalam);
+    line-height: 1.7;
+  }
+
+  /* Converted output is ASCII and looks like gibberish in a browser — that is
+     correct, not an error. Mono makes it read as data rather than broken text. */
+  .glyphs {
+    font-family: var(--font-glyph);
+    line-height: 1.6;
+    word-break: break-all;
+  }
+}
+
+/* DESIGN.md motion budget: 150–200ms, and nothing that ignores the OS setting. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
