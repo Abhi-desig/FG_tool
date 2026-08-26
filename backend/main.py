@@ -22,7 +22,8 @@ from backend.api import ai as ai_api
 from backend.api import excel as excel_api
 from backend.api import images as images_api
 from backend.api import posters as posters_api
-from backend.features import fonts, prompts
+from backend.api import styles as styles_api
+from backend.features import fonts, prompts, styles
 
 MAX_INPUT_CHARS = 20_000
 
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
 
     db.init()
     prompts.seed_defaults()
+    styles.seed_defaults()
     print(f"  device:   {config.device_name()}")
     for model in models.describe():
         state = "ready" if model["available"] else "not downloaded"
@@ -59,6 +61,7 @@ app = FastAPI(title="Focus Toolkit", version="0.1.0", lifespan=lifespan)
 app.include_router(images_api.router)
 app.include_router(excel_api.router)
 app.include_router(posters_api.router)
+app.include_router(styles_api.router)
 app.include_router(ai_api.router)
 
 

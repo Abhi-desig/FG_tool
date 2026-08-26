@@ -77,6 +77,24 @@ CREATE TABLE IF NOT EXISTS prompt_versions (
     saved_at  TEXT NOT NULL
 );
 
+-- A named poster look: the fixed prompt structure that makes it, and how the
+-- words are styled when it is chosen. The two travel together because half a
+-- style is not a style. `key` is the stable handle, so renaming one in Settings
+-- does not orphan the posters that used it.
+CREATE TABLE IF NOT EXISTS poster_styles (
+    id            INTEGER PRIMARY KEY,
+    key           TEXT NOT NULL UNIQUE,
+    name          TEXT NOT NULL,
+    description   TEXT NOT NULL DEFAULT '',
+    body          TEXT NOT NULL,
+    palette       TEXT NOT NULL DEFAULT '',
+    swatches      TEXT NOT NULL DEFAULT '[]',
+    text_defaults TEXT NOT NULL DEFAULT '{}',
+    is_default    INTEGER NOT NULL DEFAULT 0,
+    sort_order    INTEGER NOT NULL DEFAULT 0,
+    updated_at    TEXT NOT NULL
+);
+
 -- Money. Recorded in paise so the arithmetic is exact — floats and currency
 -- are a bad pairing and this total is compared against Google's console.
 CREATE TABLE IF NOT EXISTS ai_spend (
@@ -102,6 +120,14 @@ DEFAULTS: dict[str, str] = {
     "device": "auto",
     "theme": "system",
     "batch_by_default": "true",
+    # Which Gemini model each job uses. Settings rather than constants because
+    # Google renames and retires these, and a rename should cost the operator a
+    # dropdown, not a code change — the 404 that shipped in 0.1.0 was exactly
+    # this mistake. Defaults are resolved against the live model list the first
+    # time a key is tested; see backend/features/ai.py.
+    "ai_model_layout": "",
+    "ai_model_artwork": "",
+    "ai_model_photo": "",
 }
 
 

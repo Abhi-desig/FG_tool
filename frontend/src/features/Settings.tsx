@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 
+import { AiModels } from "@/components/AiModels"
 import { ApiKeys } from "@/components/ApiKeys"
 import { GlossaryManager } from "@/components/GlossaryManager"
+import { PosterStyles } from "@/components/PosterStyles"
 import { PromptLibrary } from "@/components/PromptLibrary"
 import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
@@ -227,6 +229,10 @@ export function Settings() {
       </section>
 
       <ApiKeys />
+
+      <AiModels />
+
+      <PosterStyles />
 
       <PromptLibrary />
     </div>

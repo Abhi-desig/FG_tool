@@ -35,6 +35,9 @@ export function ApiKeys() {
   const [budget, setBudget] = useState<Budget | null>(null)
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [testing, setTesting] = useState<string | null>(null)
+  // A toast is gone in four seconds; "this is the wrong sort of credential"
+  // needs to still be on screen while the operator goes to find the right one.
+  const [notice, setNotice] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     const [keyBody, status] = await Promise.all([
@@ -56,10 +59,18 @@ export function ApiKeys() {
     const value = (drafts[name] ?? "").trim()
     if (!value) return
     try {
-      setKeys((await saveKey(name, value)).keys)
+      const result = await saveKey(name, value)
+      setKeys(result.keys)
       // Drop the plaintext from component state the moment it is stored.
       setDrafts((prev) => ({ ...prev, [name]: "" }))
-      toast.success("Key saved", { description: "Encrypted on this machine." })
+      setNotice(result.warning)
+      if (result.warning) {
+        // Stored either way, but a credential of the wrong kind fails later with
+        // a message that reads as a bad key. Saying so now saves an afternoon.
+        toast.warning("Saved, but check this key", { description: result.warning })
+      } else {
+        toast.success("Key saved", { description: "Encrypted on this machine." })
+      }
     } catch {
       toast.error("Could not save that key")
     }
@@ -70,8 +81,17 @@ export function ApiKeys() {
     try {
       const result = await testKey(name)
       setKeys(result.keys)
-      if (result.ok) toast.success("Connected")
-      else toast.error("That key did not work", { description: result.message })
+      setNotice(result.ok ? null : result.message)
+      if (result.ok) {
+        const notes = result.notes ?? []
+        toast.success("Connected", {
+          description: notes.length
+            ? notes.join(" ")
+            : "The models this app uses all exist.",
+        })
+      } else {
+        toast.error("That key did not work", { description: result.message })
+      }
     } catch {
       toast.error("Could not test that key")
     } finally {
@@ -121,6 +141,15 @@ export function ApiKeys() {
             number.
           </p>
         </div>
+      )}
+
+      {notice && (
+        <p
+          role="alert"
+          className="rounded-lg border border-destructive/50 bg-destructive/5 p-3 text-sm text-destructive"
+        >
+          {notice}
+        </p>
       )}
 
       <Separator />

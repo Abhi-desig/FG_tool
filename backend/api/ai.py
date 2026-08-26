@@ -19,7 +19,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from backend import config, crypto, db
-from backend.features import ai, images, prompts
+from backend.features import ai, images, prompts, styles
 
 router = APIRouter(prefix="/api", tags=["ai"])
 
@@ -47,7 +47,11 @@ def put_key(name: str, body: KeyIn) -> dict[str, object]:
         db.set_api_key(name, body.value)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {"keys": db.list_api_keys()}
+    # Stored either way — refusing a key on its shape would be wrong the day
+    # Google changes the format — but a credential of the obviously wrong kind
+    # is named now rather than after a confusing authentication failure.
+    warning = ai.key_shape_note(body.value) if name == "GEMINI_API_KEY" else None
+    return {"keys": db.list_api_keys(), "warning": warning}
 
 
 @router.delete("/settings/keys/{name}")
@@ -58,10 +62,13 @@ def delete_key(name: str) -> dict[str, object]:
 
 @router.post("/settings/keys/{name}/test")
 def test_key(name: str) -> dict[str, object]:
-    """The cheapest real call that proves a key works.
+    """Prove the key works, and repair any model name Google has retired.
 
-    Guessing whether a key is right costs an afternoon; this costs a fraction of
-    a paisa and answers plainly.
+    Listing models is free and answers both questions at once: whether the
+    credential is accepted, and whether the models this app is configured to
+    call still exist. Fixing a stale name here — while the operator is already
+    asking "does this work" — is what stops it surfacing as a 404 in the middle
+    of a paid job, which is how this broke the first time.
     """
     if name != "GEMINI_API_KEY":
         raise HTTPException(400, f"No connection test for {name} yet.")
@@ -69,17 +76,67 @@ def test_key(name: str) -> dict[str, object]:
         raise HTTPException(404, "That key is not set.")
 
     try:
-        client = ai._client()  # noqa: SLF001 - same package, deliberate
-        client.models.generate_content(model=ai.LAYOUT_MODEL, contents="ping")
-        db.record_key_test(name, True)
-        return {"ok": True, "message": "Connected.", "keys": db.list_api_keys()}
+        resolved = ai.resolve_models()
     except Exception as exc:  # noqa: BLE001 - report, never raise past here
         db.record_key_test(name, False)
         return {
             "ok": False,
             "message": ai._friendly(exc),  # noqa: SLF001
             "keys": db.list_api_keys(),
+            "models": ai.model_settings(),
         }
+
+    db.record_key_test(name, True)
+    notes = list(resolved["notes"])
+    return {
+        "ok": True,
+        "message": " ".join(["Connected.", *notes]),
+        "notes": notes,
+        "keys": db.list_api_keys(),
+        "models": resolved,
+    }
+
+
+# --- which model does which job --------------------------------------------
+
+
+class ModelChoiceIn(BaseModel):
+    """Empty string means "go back to the shipped default"."""
+
+    artwork: str | None = Field(default=None, max_length=120)
+    photo: str | None = Field(default=None, max_length=120)
+    layout: str | None = Field(default=None, max_length=120)
+
+
+@router.get("/ai/models")
+def ai_models(refresh: bool = False) -> dict[str, object]:
+    """The chosen models, and — with `refresh` — what Google actually offers.
+
+    The live list needs a working key, so a failure here is reported as data
+    rather than an error: the picker still shows what is configured.
+    """
+    if not refresh:
+        return ai.model_settings()
+    try:
+        return ai.model_settings(ai.available_models()) | {"error": None}
+    except Exception as exc:  # noqa: BLE001 - report, never raise past here
+        return ai.model_settings() | {"error": ai._friendly(exc)}  # noqa: SLF001
+
+
+@router.put("/ai/models")
+def put_ai_models(body: ModelChoiceIn) -> dict[str, object]:
+    updates = {
+        ai.PREFERENCE_KEY[role]: (value or "").strip()
+        for role, value in body.model_dump().items()
+        if value is not None
+    }
+    if not updates:
+        return ai.model_settings()
+    try:
+        db.set_preferences(updates)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return ai.model_settings()
 
 
 # --- prompt library --------------------------------------------------------
@@ -242,16 +299,51 @@ def photo_edit(
 
 
 class ArtworkIn(BaseModel):
-    subject: str = Field(min_length=1, max_length=2000)
+    """A picture request, described by the poster's own copy.
+
+    `style_key` is what makes this different from a plain image prompt: with one,
+    the shop's saved prompt structure for that look is filled in with the copy
+    below, so the picture ends up about the message rather than about whatever
+    the operator managed to describe in a hurry.
+    """
+
+    style_key: str | None = Field(default=None, max_length=40)
+    headline: str = Field(default="", max_length=500)
+    offer: str = Field(default="", max_length=500)
+    occasion: str = Field(default="", max_length=200)
+    phone: str = Field(default="", max_length=100)
+    # The operator's own idea for the picture, when they have one.
+    idea: str = Field(default="", max_length=2000)
+    # Free-form fallback, and what the prompt-library template still uses.
+    subject: str = Field(default="", max_length=2000)
     style: str = ""
     palette: str = ""
     aspect: str = ""
     batch: bool = True
 
+    def values(self) -> dict[str, str]:
+        return self.model_dump(exclude={"batch", "style_key"})
+
+
+@router.post("/ai/artwork/prompt")
+def artwork_prompt(body: ArtworkIn) -> dict[str, object]:
+    """Free. The exact words that would be sent, so nothing is hidden."""
+    try:
+        text = ai.artwork_prompt(body.values(), body.style_key)
+    except db.NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except styles.StyleError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "prompt": text,
+        "style_key": body.style_key,
+        "estimate": ai.estimate("poster-artwork", body.batch),
+    }
+
 
 @router.post("/ai/artwork")
 def artwork(body: ArtworkIn) -> dict[str, object]:
-    return _result(ai.generate_artwork(body.model_dump(exclude={"batch"}), body.batch))
+    return _result(ai.generate_artwork(body.values(), body.batch, body.style_key))
 
 
 class LayoutPlanIn(BaseModel):

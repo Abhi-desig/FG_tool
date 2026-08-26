@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { AiArtwork } from "@/components/AiArtwork"
+import { type Copy, EMPTY_COPY, PosterCopy } from "@/components/PosterCopy"
+import { StylePicker } from "@/components/StylePicker"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -15,13 +17,17 @@ import {
 } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import {
+  type BlockRole,
   type BlockSize,
   type CanvasPreset,
+  type CopyLine,
+  type DesignStyle,
   type PosterBlock,
   type PosterCheck,
   type PosterLayout,
   autoLayout,
   checkPoster,
+  listStyles,
   posterPresets,
   posterSvg,
 } from "@/lib/api"
@@ -38,10 +44,42 @@ const SIZE_FRACTION: Record<string, number> = {
   huge: 0.135,
 }
 
+// Where each line starts out. A poster that opens looking like a poster is
+// easier to correct than one that opens as four lines stacked in the middle.
+const ROLE_LAYOUT: Record<
+  Exclude<BlockRole, "free">,
+  { y: number; size: BlockSize; order: number }
+> = {
+  occasion: { y: 0.1, size: "medium", order: 0 },
+  headline: { y: 0.2, size: "large", order: 1 },
+  offer: { y: 0.45, size: "huge", order: 2 },
+  phone: { y: 0.86, size: "small", order: 3 },
+}
+
+const ROLE_LABEL: Record<BlockRole, string> = {
+  headline: "Headline",
+  offer: "Offer",
+  occasion: "Occasion",
+  phone: "Phone",
+  free: "Extra line",
+}
+
+const STEPS = [
+  { n: 1, title: "The words" },
+  { n: 2, title: "The look" },
+  { n: 3, title: "The picture" },
+  { n: 4, title: "Finish" },
+] as const
+
 let counter = 0
 const nextId = () => `t${++counter}`
 
-function newBlock(text: string, y: number, size: BlockSize): PosterBlock {
+function newBlock(
+  text: string,
+  y: number,
+  size: BlockSize,
+  role: BlockRole = "free",
+): PosterBlock {
   return {
     id: nextId(),
     text,
@@ -54,28 +92,32 @@ function newBlock(text: string, y: number, size: BlockSize): PosterBlock {
     align: "centre",
     mode: "unicode",
     shadow: true,
+    role,
   }
 }
 
-const STARTER: PosterBlock[] = [
-  newBlock("ഗ്രാൻഡ് സെയിൽ", 0.12, "medium"),
-  newBlock("50% OFF", 0.4, "huge"),
-  newBlock("9847 000 000", 0.85, "small"),
-]
-
 /**
- * Phase 4. The app draws the text; the AI (Phase 5) will only ever supply the
- * picture and a layout plan.
+ * Phase 4 + 5. The app draws the text; the AI only ever supplies the picture.
  *
  * Text boxes are DOM elements rather than canvas objects, so the browser shapes
  * Malayalam natively, the boxes are keyboard-operable, and each one maps 1:1
- * onto an SVG <text> at export. See ADR-019.
+ * onto an SVG `<text>` at export. See ADR-019.
+ *
+ * **The flow is the feature.** The words are typed once and everything else is
+ * built from them: each line becomes a text block, and the same words — through
+ * the chosen style's saved prompt — become the picture. The previous screen
+ * opened on a canvas of sample Malayalam with a separate "Picture of…" box, so
+ * the operator wrote the poster twice and nothing made the halves agree.
  */
 export function PosterDesigner() {
+  const [step, setStep] = useState(1)
   const [presets, setPresets] = useState<CanvasPreset[]>([])
   const [canvasKey, setCanvasKey] = useState("a4-portrait")
-  const [blocks, setBlocks] = useState<PosterBlock[]>(STARTER)
-  const [selected, setSelected] = useState<string | null>(STARTER[0].id)
+  const [styles, setStyles] = useState<DesignStyle[]>([])
+  const [styleKey, setStyleKey] = useState<string | null>(null)
+  const [copy, setCopy] = useState<Copy>(EMPTY_COPY)
+  const [blocks, setBlocks] = useState<PosterBlock[]>([])
+  const [selected, setSelected] = useState<string | null>(null)
   const [bgFile, setBgFile] = useState<File | null>(null)
   const [bgUrl, setBgUrl] = useState<string | null>(null)
   const [bgColour, setBgColour] = useState("#1b1b22")
@@ -93,15 +135,31 @@ export function PosterDesigner() {
     [presets, canvasKey],
   )
 
+  const style = useMemo(
+    () => styles.find((s) => s.key === styleKey) ?? null,
+    [styles, styleKey],
+  )
+
   const layout: PosterLayout = useMemo(
     () => ({ canvas: canvasKey, blocks, background_colour: bgColour }),
     [canvasKey, blocks, bgColour],
   )
 
+  // Described in words the image model can use, not in millimetres.
+  const aspect = useMemo(() => {
+    if (!preset) return "portrait"
+    const ratio = preset.width_mm / preset.height_mm
+    const shape = ratio > 1.15 ? "landscape" : ratio < 0.87 ? "portrait" : "square"
+    return `${preset.label} (${shape})`
+  }, [preset])
+
   useEffect(() => {
     posterPresets()
       .then((p) => setPresets(p.canvases))
       .catch(() => setPresets([]))
+    listStyles()
+      .then((s) => setStyles(s.styles))
+      .catch(() => setStyles([]))
   }, [])
 
   useEffect(() => {
@@ -112,13 +170,17 @@ export function PosterDesigner() {
 
   // Safe-zone and overflow warnings, debounced while dragging.
   useEffect(() => {
+    if (blocks.length === 0) {
+      setCheck(null)
+      return
+    }
     const timer = setTimeout(() => {
       checkPoster(layout)
         .then(setCheck)
         .catch(() => setCheck(null))
     }, 250)
     return () => clearTimeout(timer)
-  }, [layout])
+  }, [layout, blocks.length])
 
   const unsafe = useMemo(
     () => new Set((check?.safe_zone ?? []).filter((s) => s.outside_safe_zone).map((s) => s.id)),
@@ -127,6 +189,78 @@ export function PosterDesigner() {
 
   const update = useCallback((id: string, patch: Partial<PosterBlock>) => {
     setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)))
+  }, [])
+
+  // --- copy drives the blocks -------------------------------------------
+  //
+  // One line of copy, one block. A block the operator has since dragged or
+  // recoloured keeps those changes — only its text follows the copy — because
+  // retyping a phone number should not undo ten minutes of placement.
+  useEffect(() => {
+    setBlocks((prev) => {
+      const kept = prev.filter(
+        (b) => b.role === "free" || copy[b.role as Exclude<BlockRole, "free">]?.trim(),
+      )
+      let changed = kept.length !== prev.length
+      const next = kept.map((b) => {
+        if (b.role === "free") return b
+        const text = copy[b.role as Exclude<BlockRole, "free">]
+        if (text === b.text) return b
+        changed = true
+        return { ...b, text }
+      })
+
+      for (const [role, spec] of Object.entries(ROLE_LAYOUT)) {
+        const text = copy[role as Exclude<BlockRole, "free">].trim()
+        if (!text || next.some((b) => b.role === role)) continue
+        changed = true
+        next.push(newBlock(text, spec.y, spec.size, role as BlockRole))
+      }
+
+      if (!changed) return prev
+      return next.sort(
+        (a, b) =>
+          (ROLE_LAYOUT[a.role as Exclude<BlockRole, "free">]?.order ?? 9) -
+          (ROLE_LAYOUT[b.role as Exclude<BlockRole, "free">]?.order ?? 9),
+      )
+    })
+  }, [copy])
+
+  /**
+   * Take one pasted message and lay the whole poster out from it.
+   *
+   * Lines the splitter could not place become extra text blocks rather than
+   * being discarded — the operator can move or delete them, but they never lose
+   * a line of the client's wording without being told.
+   */
+  const applySplit = useCallback((lines: CopyLine[]) => {
+    const next: Copy = { ...EMPTY_COPY }
+    const spare: string[] = []
+    for (const line of lines) {
+      if (line.role === "free" || next[line.role]) spare.push(line.text)
+      else next[line.role] = line.text
+    }
+    setCopy(next)
+    // A new paste replaces the last one's leftovers; the four named lines are
+    // handled by the copy effect below.
+    setBlocks((prev) => [
+      ...prev.filter((b) => b.role !== "free"),
+      ...spare.map((text, i) => newBlock(text, 0.62 + i * 0.06, "small")),
+    ])
+    setStep(2)
+  }, [])
+
+  /** Picking a look repaints the words too — half a style is not a style. */
+  const applyStyle = useCallback((picked: DesignStyle) => {
+    setStyleKey(picked.key)
+    const defaults = picked.text_defaults ?? {}
+    if (defaults.background_colour) setBgColour(defaults.background_colour)
+    setBlocks((prev) =>
+      prev.map((b) => {
+        const spec = defaults[b.role as Exclude<BlockRole, "free">]
+        return spec ? { ...b, ...spec } : b
+      }),
+    )
   }, [])
 
   // --- dragging ---------------------------------------------------------
@@ -180,8 +314,7 @@ export function PosterDesigner() {
 
   // --- actions ----------------------------------------------------------
 
-  const acceptBackground = (file: File) => {
-    if (bgUrl) URL.revokeObjectURL(bgUrl)
+  const acceptBackground = useCallback((file: File) => {
     const url = URL.createObjectURL(file)
     const img = new Image()
     img.onload = () => {
@@ -189,12 +322,15 @@ export function PosterDesigner() {
     }
     img.src = url
     setBgFile(file)
-    setBgUrl(url)
-  }
+    setBgUrl((previous) => {
+      if (previous) URL.revokeObjectURL(previous)
+      return url
+    })
+  }, [])
 
   const runAuto = async () => {
     if (!bgFile) {
-      toast.error("Add a background picture first")
+      toast.error("Add a picture first")
       return
     }
     setBusy(true)
@@ -259,10 +395,17 @@ export function PosterDesigner() {
   }
 
   const current = blocks.find((b) => b.id === selected) ?? null
-  const aspect = preset ? preset.width_mm / preset.height_mm : 210 / 297
+  const ratio = preset ? preset.width_mm / preset.height_mm : 210 / 297
   const safeInset = preset
     ? { x: (preset.safe_mm / preset.width_mm) * 100, y: (preset.safe_mm / preset.height_mm) * 100 }
     : { x: 2, y: 2 }
+
+  const done: Record<number, boolean> = {
+    1: copy.headline.trim().length > 0,
+    2: style !== null,
+    3: bgFile !== null,
+    4: false,
+  }
 
   return (
     <div className="space-y-5">
@@ -270,15 +413,16 @@ export function PosterDesigner() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Poster designer</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Every word stays real, editable text — which is why Malayalam comes out right.
+            Type the words once. The look and the picture are built from them — and
+            every word stays real, editable text.
           </p>
         </div>
         <Badge variant="secondary" className="font-normal">
-          Offline · free
+          {style ? style.name : "No look chosen"}
         </Badge>
       </header>
 
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
         {/* Stage */}
         <div className="space-y-3">
           <div
@@ -287,7 +431,7 @@ export function PosterDesigner() {
             onPointerUp={onPointerUp}
             className="relative w-full overflow-hidden rounded-xl border bg-muted"
             style={{
-              aspectRatio: String(aspect),
+              aspectRatio: String(ratio),
               backgroundColor: bgColour,
               // Makes `cqh` on the text boxes mean "% of stage height", so the
               // preview scales exactly like the export does.
@@ -315,12 +459,18 @@ export function PosterDesigner() {
               />
             )}
 
+            {blocks.length === 0 && (
+              <p className="absolute inset-0 flex items-center justify-center p-8 text-center text-sm text-muted-foreground">
+                Write the headline in step 1 and it appears here.
+              </p>
+            )}
+
             {blocks.map((block) => (
               <div
                 key={block.id}
                 role="button"
                 tabIndex={0}
-                aria-label={`Text: ${block.text}`}
+                aria-label={`${ROLE_LABEL[block.role]}: ${block.text}`}
                 onPointerDown={(e) => onPointerDown(e, block)}
                 onKeyDown={(e) => onKeyDown(e, block)}
                 onFocus={() => setSelected(block.id)}
@@ -351,18 +501,21 @@ export function PosterDesigner() {
 
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" onClick={() => bgInputRef.current?.click()}>
-              {bgFile ? "Change picture" : "Add picture"}
+              {bgFile ? "Change picture" : "Use my own picture"}
             </Button>
             <Button variant="outline" onClick={() => void runAuto()} disabled={busy || !bgFile}>
               Place automatically
             </Button>
             <Button
               variant="ghost"
-              onClick={() =>
-                setBlocks((prev) => [...prev, newBlock("New line", 0.5, "medium")])
-              }
+              onClick={() => {
+                const added = newBlock("New line", 0.5, "medium")
+                setBlocks((prev) => [...prev, added])
+                setSelected(added.id)
+                setStep(4)
+              }}
             >
-              Add text
+              Add a line
             </Button>
             <Button
               variant="ghost"
@@ -372,10 +525,17 @@ export function PosterDesigner() {
               {showSafe ? "Hide" : "Show"} trim guide
             </Button>
             <div className="ml-auto flex gap-2">
-              <Button variant="outline" onClick={() => void exportPng()} disabled={busy}>
+              <Button
+                variant="outline"
+                onClick={() => void exportPng()}
+                disabled={busy || blocks.length === 0}
+              >
                 PNG proof
               </Button>
-              <Button onClick={() => void exportSvg()} disabled={busy}>
+              <Button
+                onClick={() => void exportSvg()}
+                disabled={busy || blocks.length === 0}
+              >
                 Export SVG
               </Button>
             </div>
@@ -405,169 +565,299 @@ export function PosterDesigner() {
           ))}
         </div>
 
-        {/* Inspector */}
-        <div className="space-y-4">
-          <section className="space-y-3 rounded-xl border bg-card p-4">
-            <Label htmlFor="canvas">Size</Label>
-            <Select value={canvasKey} onValueChange={setCanvasKey}>
-              <SelectTrigger id="canvas">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {presets.map((p) => (
-                  <SelectItem key={p.key} value={p.key}>
-                    {p.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {preset && (
-              <p className="text-xs text-muted-foreground">
-                {preset.width_px}×{preset.height_px} px at {preset.dpi} DPI ·{" "}
-                {preset.safe_mm} mm trim margin
-              </p>
-            )}
-            <div className="space-y-1.5">
-              <Label htmlFor="bg-colour">Background colour</Label>
-              <Input
-                id="bg-colour"
-                type="color"
-                value={bgColour}
-                onChange={(e) => setBgColour(e.target.value)}
-                className="h-9 w-full p-1"
-              />
-            </div>
-          </section>
+        {/* Steps */}
+        <div className="space-y-2">
+          <Step
+            n={1}
+            title="The words"
+            summary={copy.headline.trim() || "Nothing written yet"}
+            open={step === 1}
+            done={done[1]}
+            onOpen={() => setStep(1)}
+          >
+            <PosterCopy copy={copy} onChange={setCopy} onSplit={applySplit} />
+          </Step>
 
-          <AiArtwork onArtwork={acceptBackground} />
+          <Step
+            n={2}
+            title="The look"
+            summary={style ? style.name : "No look chosen"}
+            open={step === 2}
+            done={done[2]}
+            onOpen={() => setStep(2)}
+          >
+            <StylePicker styles={styles} chosen={styleKey} onChoose={applyStyle} />
+            <p className="mt-3 text-xs text-muted-foreground">
+              A look sets the colours of your words and decides how the picture is
+              asked for. The wording behind each one lives in Settings → Poster
+              design styles.
+            </p>
+          </Step>
 
-          {current && (
-            <section className="space-y-3 rounded-xl border bg-card p-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold">Selected text</h2>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2 text-xs"
-                  onClick={() => {
-                    setBlocks((prev) => prev.filter((b) => b.id !== current.id))
-                    setSelected(null)
-                  }}
-                >
-                  Remove
-                </Button>
+          <Step
+            n={3}
+            title="The picture"
+            summary={bgFile ? "Picture in place" : "Plain colour"}
+            open={step === 3}
+            done={done[3]}
+            onOpen={() => setStep(3)}
+          >
+            <AiArtwork
+              copy={copy}
+              style={style}
+              aspect={aspect}
+              onArtwork={acceptBackground}
+            />
+            <Separator className="my-3" />
+            <Button
+              variant="outline"
+              className="w-full"
+              onClick={() => bgInputRef.current?.click()}
+            >
+              Use my own picture instead
+            </Button>
+          </Step>
+
+          <Step
+            n={4}
+            title="Finish"
+            summary={preset?.label ?? "Choose a size"}
+            open={step === 4}
+            done={done[4]}
+            onOpen={() => setStep(4)}
+          >
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="canvas">Size</Label>
+                <Select value={canvasKey} onValueChange={setCanvasKey}>
+                  <SelectTrigger id="canvas">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {presets.map((p) => (
+                      <SelectItem key={p.key} value={p.key}>
+                        {p.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {preset && (
+                  <p className="text-xs text-muted-foreground">
+                    {preset.width_px}×{preset.height_px} px at {preset.dpi} DPI ·{" "}
+                    {preset.safe_mm} mm trim margin
+                  </p>
+                )}
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="block-text">Words</Label>
+                <Label htmlFor="bg-colour">Background colour</Label>
                 <Input
-                  id="block-text"
-                  value={current.text}
-                  className="malayalam"
-                  onChange={(e) => update(current.id, { text: e.target.value })}
+                  id="bg-colour"
+                  type="color"
+                  value={bgColour}
+                  onChange={(e) => setBgColour(e.target.value)}
+                  className="h-9 w-full p-1"
                 />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="block-size">Size</Label>
-                  <Select
-                    value={current.size}
-                    onValueChange={(v) => update(current.id, { size: v as BlockSize })}
-                  >
-                    <SelectTrigger id="block-size">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {SIZES.map((s) => (
-                        <SelectItem key={s} value={s}>
-                          {s}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="block-colour">Colour</Label>
-                  <Input
-                    id="block-colour"
-                    type="color"
-                    value={current.colour}
-                    onChange={(e) => update(current.id, { colour: e.target.value })}
-                    className="h-9 w-full p-1"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="block-align">Align</Label>
-                  <Select
-                    value={current.align}
-                    onValueChange={(v) =>
-                      update(current.id, { align: v as PosterBlock["align"] })
-                    }
-                  >
-                    <SelectTrigger id="block-align">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="left">Left</SelectItem>
-                      <SelectItem value="centre">Centre</SelectItem>
-                      <SelectItem value="right">Right</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="block-weight">Weight</Label>
-                  <Select
-                    value={current.weight}
-                    onValueChange={(v) =>
-                      update(current.id, { weight: v as PosterBlock["weight"] })
-                    }
-                  >
-                    <SelectTrigger id="block-weight">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="regular">Regular</SelectItem>
-                      <SelectItem value="bold">Bold</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
               </div>
 
               <Separator />
 
-              <div className="space-y-1.5">
-                <Label htmlFor="block-mode">Font for export</Label>
-                <Select
-                  value={current.mode}
-                  onValueChange={(v) =>
-                    update(current.id, { mode: v as PosterBlock["mode"] })
-                  }
-                >
-                  <SelectTrigger id="block-mode">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="unicode">Unicode (Noto Sans Malayalam)</SelectItem>
-                    <SelectItem value="ascii">ML-TTKarthika (CorelDRAW)</SelectItem>
-                  </SelectContent>
-                </Select>
+              {current ? (
+                <BlockInspector
+                  block={current}
+                  onChange={(patch) => update(current.id, patch)}
+                  onRemove={() => {
+                    if (current.role !== "free") {
+                      setCopy((prev) => ({ ...prev, [current.role]: "" }))
+                    }
+                    setBlocks((prev) => prev.filter((b) => b.id !== current.id))
+                    setSelected(null)
+                  }}
+                />
+              ) : (
                 <p className="text-xs text-muted-foreground">
-                  {current.mode === "ascii"
-                    ? "The SVG carries ML-TTKarthika codes, converted exactly like the Malayalam converter does. Correct in CorelDRAW — and gibberish anywhere that font is not installed."
-                    : "Real Unicode text. Use this unless CorelDRAW is set to ML-TTKarthika."}
+                  Click a line on the poster to change how it looks. Drag to move it,
+                  or use the arrow keys — hold Shift for bigger steps.
                 </p>
-              </div>
-
-              <p className="text-xs text-muted-foreground">
-                Drag to move, or select and use the arrow keys — hold Shift for bigger steps.
-              </p>
-            </section>
-          )}
+              )}
+            </div>
+          </Step>
         </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * One step of the flow.
+ *
+ * Collapsed steps stay on screen as a one-line summary rather than disappearing,
+ * so the operator can always see what they chose without reopening anything.
+ */
+function Step({
+  n,
+  title,
+  summary,
+  open,
+  done,
+  onOpen,
+  children,
+}: {
+  n: number
+  title: string
+  summary: string
+  open: boolean
+  done: boolean
+  onOpen: () => void
+  children: React.ReactNode
+}) {
+  const label = STEPS[n - 1]?.title ?? title
+  return (
+    <section className={`rounded-xl border bg-card ${open ? "" : "bg-card/60"}`}>
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-expanded={open}
+        className="flex w-full items-center gap-3 rounded-xl p-3 text-left outline-offset-2 hover:bg-accent/50"
+      >
+        <span
+          className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
+            done
+              ? "bg-primary text-primary-foreground"
+              : "border border-border text-muted-foreground"
+          }`}
+          aria-hidden="true"
+        >
+          {done ? "✓" : n}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-semibold">{label}</span>
+          {!open && (
+            <span className="malayalam block truncate text-xs text-muted-foreground">
+              {summary}
+            </span>
+          )}
+        </span>
+      </button>
+      {open && <div className="border-t p-3">{children}</div>}
+    </section>
+  )
+}
+
+function BlockInspector({
+  block,
+  onChange,
+  onRemove,
+}: {
+  block: PosterBlock
+  onChange: (patch: Partial<PosterBlock>) => void
+  onRemove: () => void
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold">{ROLE_LABEL[block.role]}</h3>
+        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={onRemove}>
+          Remove
+        </Button>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="block-text">Words</Label>
+        <Input
+          id="block-text"
+          value={block.text}
+          className="malayalam"
+          onChange={(e) => onChange({ text: e.target.value })}
+        />
+        {block.role !== "free" && (
+          <p className="text-xs text-muted-foreground">
+            Changing it here also changes it in step 1.
+          </p>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="block-size">Size</Label>
+          <Select value={block.size} onValueChange={(v) => onChange({ size: v as BlockSize })}>
+            <SelectTrigger id="block-size">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SIZES.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {s}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="block-colour">Colour</Label>
+          <Input
+            id="block-colour"
+            type="color"
+            value={block.colour}
+            onChange={(e) => onChange({ colour: e.target.value })}
+            className="h-9 w-full p-1"
+          />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="block-align">Align</Label>
+          <Select
+            value={block.align}
+            onValueChange={(v) => onChange({ align: v as PosterBlock["align"] })}
+          >
+            <SelectTrigger id="block-align">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="left">Left</SelectItem>
+              <SelectItem value="centre">Centre</SelectItem>
+              <SelectItem value="right">Right</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="block-weight">Weight</Label>
+          <Select
+            value={block.weight}
+            onValueChange={(v) => onChange({ weight: v as PosterBlock["weight"] })}
+          >
+            <SelectTrigger id="block-weight">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="regular">Regular</SelectItem>
+              <SelectItem value="bold">Bold</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="block-mode">Font for export</Label>
+        <Select
+          value={block.mode}
+          onValueChange={(v) => onChange({ mode: v as PosterBlock["mode"] })}
+        >
+          <SelectTrigger id="block-mode">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="unicode">Unicode (Noto Sans Malayalam)</SelectItem>
+            <SelectItem value="ascii">ML-TTKarthika (CorelDRAW)</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          {block.mode === "ascii"
+            ? "The SVG carries ML-TTKarthika codes, converted exactly like the Malayalam converter does. Correct in CorelDRAW — and gibberish anywhere that font is not installed."
+            : "Real Unicode text. Use this unless CorelDRAW is set to ML-TTKarthika."}
+        </p>
       </div>
     </div>
   )

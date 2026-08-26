@@ -94,6 +94,51 @@ image text** — that constraint is the foundation of the Malayalam advantage de
 
 ---
 
+## 2a · Poster design styles
+
+The looks the poster designer offers in step 2, and the fixed prompt behind each one. See
+[ADR-027](DECISIONS.md).
+
+A style is one row in `poster_styles` and carries both halves of a look:
+
+| Field | What it is |
+|---|---|
+| `key` | Stable handle a poster remembers. Renaming the style is safe; changing this is not. |
+| `body` | The fixed prompt structure. Variables: `{{headline}}` `{{offer}}` `{{occasion}}` `{{phone}}` `{{idea}}` `{{subject}}` `{{palette}}` `{{aspect}}` |
+| `palette` | Colours to ask the AI for, used when the operator has not overridden them |
+| `swatches` | Three hex colours, so the picker shows an appearance rather than a name |
+| `text_defaults` | Background colour, and the colour/size/weight each line takes on |
+
+Six ship seeded: **Festival**, **Big offer**, **Wedding**, **Modern minimal**, **Product shot**,
+**Event banner**.
+
+### Behaviour
+
+- **The copy is the brief.** The operator's own words are substituted into the style's prompt, so
+  the picture is generated from the message on the poster rather than from a second description.
+- **`{{idea}}`** is the operator's optional own suggestion for the picture. Left empty, its line
+  disappears rather than reaching the model as a bare label.
+- **Every style must forbid lettering.** `styles.validate()` refuses a body that does not, and
+  warns on an unknown or missing variable — a model handed a Malayalam headline will draw it, and
+  will draw it wrong.
+- **See exactly what will be sent.** The designer renders the assembled prompt for free before any
+  paid call, so nothing about the spend is taken on trust.
+- **Restore default** on any seeded style. Only a style the shop added itself can be deleted.
+
+---
+
+## 2b · AI models
+
+Which Gemini model does which job — artwork, photo editing, layout planning. Chosen from a list
+fetched live from Google, not hardcoded. See [ADR-026](DECISIONS.md).
+
+- **Refresh from Google** lists what the key can actually call.
+- **Testing the key** repairs any configured name Google has since retired, and says which.
+- Prices shown are this app's estimate **for the job**, not a quote from Google. Choosing a larger
+  model costs more than the figure shown.
+
+---
+
 ## 3 · Preferences
 
 | Setting | Options | Default | Notes |

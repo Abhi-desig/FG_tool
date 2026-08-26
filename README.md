@@ -112,6 +112,22 @@ Right-click → Send to → Desktop. That is your app icon.
 chmod +x start.command
 ```
 
+### When the AI features fail
+
+A rejected API key looks exactly like a broken install, which sends you reinstalling things that
+were never wrong. This says which it is, and costs nothing:
+
+```bash
+uv run python -m backend.diagnose
+```
+
+Or double-click `check-ai.bat` (Windows) / `check-ai.command` (macOS). It checks the program with
+Google stubbed out, then makes one free call to check the key, and names whichever one is at fault.
+
+Note that Google changed its key format in 2026: keys from
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey) now begin `AQ.`, and the older
+`AIza` keys stop working in September 2026.
+
 ---
 
 ## For developers

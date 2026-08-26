@@ -26,25 +26,106 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from backend import db
-from backend.features import prompts
+from backend.features import prompts, styles
 
 log = logging.getLogger(__name__)
 
 Feature = Literal["photo-edit", "poster-artwork", "poster-layout"]
 
-# Verified against ai.google.dev pricing on 2026-08-22, converted at ~₹88/USD
-# and rounded up. Editable from Settings, because Google will change them and
-# the operator should not need a code change to stay accurate.
-RATES_PAISE: dict[str, int] = {
-    "gemini-3.1-flash-image": 400,  # ~₹4    photo edits
-    "gemini-3-pro-image": 1150,  # ~₹11.50  poster artwork, instant
-    "gemini-3-pro-image:batch": 600,  # ~₹6  poster artwork, batch — half price
-    "gemini-3-flash": 5,  # text-only layout planning, negligible
-}
+# --- which model does which job -------------------------------------------
+#
+# **Model names are settings, not constants.** Google renames and retires these
+# on its own schedule, and a name that no longer exists fails as a 404 halfway
+# through a job — which is precisely how 0.1.0 shipped calling three models that
+# had never existed at all. So the names below are only *defaults*: the operator
+# can pick from the live list in Settings, and testing the key repairs a stale
+# choice automatically. Nothing here is load-bearing enough to need a code
+# change when Google moves.
 
-PHOTO_MODEL = "gemini-3.1-flash-image"
-ARTWORK_MODEL = "gemini-3-pro-image"
-LAYOUT_MODEL = "gemini-3-flash"
+PHOTO_MODEL = "gemini-2.5-flash-image"
+ARTWORK_MODEL = "gemini-2.5-flash-image"
+LAYOUT_MODEL = "gemini-2.5-flash"
+
+
+@dataclass(frozen=True)
+class Role:
+    """One job, and the models that can do it."""
+
+    key: str
+    feature: Feature
+    label: str
+    description: str
+    # Whether this job needs a model that can return a picture.
+    needs_image: bool
+    default: str
+    # Tried in order when the configured model has gone missing. Ordered by
+    # running cost, not by quality — silently upgrading the shop to a dearer
+    # model is a spending decision, and those are the operator's to make.
+    fallbacks: tuple[str, ...]
+    rate_paise: int
+    batch_rate_paise: int | None = None
+
+
+ROLES: tuple[Role, ...] = (
+    Role(
+        key="artwork",
+        feature="poster-artwork",
+        label="Poster artwork",
+        description="Draws the picture behind the poster. Never any words in it.",
+        needs_image=True,
+        default=ARTWORK_MODEL,
+        fallbacks=(
+            "gemini-2.5-flash-image",
+            "gemini-3-pro-image-preview",
+            "gemini-2.0-flash-preview-image-generation",
+        ),
+        rate_paise=1150,  # ~₹11.50 instant
+        batch_rate_paise=600,  # ~₹6 batch — half price
+    ),
+    Role(
+        key="photo",
+        feature="photo-edit",
+        label="Photo editing",
+        description="Changes a client photograph you upload.",
+        needs_image=True,
+        default=PHOTO_MODEL,
+        fallbacks=("gemini-2.5-flash-image", "gemini-3-pro-image-preview"),
+        rate_paise=400,  # ~₹4
+    ),
+    Role(
+        key="layout",
+        feature="poster-layout",
+        label="Layout planning",
+        description="Text only — asks where the words should go. Costs almost nothing.",
+        needs_image=False,
+        default=LAYOUT_MODEL,
+        fallbacks=(
+            "gemini-2.5-flash",
+            "gemini-flash-latest",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash",
+        ),
+        rate_paise=5,  # negligible, but not free
+    ),
+)
+
+ROLE_BY_KEY = {r.key: r for r in ROLES}
+ROLE_BY_FEATURE = {r.feature: r for r in ROLES}
+PREFERENCE_KEY = {r.key: f"ai_model_{r.key}" for r in ROLES}
+
+# Converted at ~₹88/USD and rounded up. An **estimate** — the budget meter says
+# so, and Google's console is the truth.
+#
+# Keyed by *role*, not by model, because the model is now the operator's choice
+# and one model can do two jobs at very different sizes: the same image model
+# both edits a photograph and paints a full poster background. Pricing the job
+# rather than the model keeps the quote right whichever name Google is using
+# this month.
+RATES_PAISE: dict[str, int] = {}
+for _role in ROLES:
+    RATES_PAISE[_role.key] = _role.rate_paise
+    if _role.batch_rate_paise is not None:
+        RATES_PAISE[f"{_role.key}:batch"] = _role.batch_rate_paise
 
 MONTHLY_BUDGET_PAISE = 200_000  # ₹2,000
 
@@ -72,22 +153,46 @@ class AiResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def cost_of(model: str, batch: bool) -> int:
-    key = f"{model}:batch" if batch and f"{model}:batch" in RATES_PAISE else model
-    return RATES_PAISE.get(key, 0)
+def model_for(role: Role | str) -> str:
+    """The model this job should use — the operator's choice, or the default.
+
+    Reads settings every call rather than caching, because changing the model in
+    Settings has to take effect on the very next job. These are cheap SQLite
+    reads on a single-operator machine.
+    """
+    spec = ROLE_BY_KEY[role] if isinstance(role, str) else role
+    chosen = db.get_preferences().get(PREFERENCE_KEY[spec.key], "").strip()
+    return chosen or spec.default
+
+
+def cost_of(model_or_role: str, batch: bool = False) -> int:
+    """What one call costs, in paise.
+
+    Accepts a role key ("artwork") or a model name. A model that serves two
+    roles — the same image model both edits photographs and paints poster
+    backgrounds — is priced at the dearer of them, so a quote given by model
+    name is never an under-quote.
+    """
+    if model_or_role in ROLE_BY_KEY:
+        key = model_or_role
+        batch_key = f"{key}:batch"
+        if batch and batch_key in RATES_PAISE:
+            return RATES_PAISE[batch_key]
+        return RATES_PAISE.get(key, 0)
+
+    matches = [r for r in ROLES if model_for(r) == model_or_role or r.default == model_or_role]
+    if not matches:
+        return 0
+    return max(cost_of(r.key, batch) for r in matches)
 
 
 def estimate(feature: Feature, batch: bool) -> dict[str, Any]:
     """What this will cost, before committing to it."""
-    model = {
-        "photo-edit": PHOTO_MODEL,
-        "poster-artwork": ARTWORK_MODEL,
-        "poster-layout": LAYOUT_MODEL,
-    }[feature]
-    paise = cost_of(model, batch)
+    role = ROLE_BY_FEATURE[feature]
+    paise = cost_of(role.key, batch)
     return {
         "feature": feature,
-        "model": model,
+        "model": model_for(role),
         "batch": batch,
         "cost_paise": paise,
         "cost_rupees": round(paise / 100, 2),
@@ -115,10 +220,83 @@ def _client() -> Any:
     return genai.Client(api_key=key)
 
 
+def key_shape_note(value: str) -> str | None:
+    """Say so immediately when a pasted key is the wrong *kind* of credential.
+
+    Google changed the format in 2026, and this function used to have it exactly
+    backwards — it told the operator that a current key was an OAuth token and
+    sent them off to make a deprecated one. The two formats now are:
+
+    * `AQ.Ab…` — an **auth key**, bound to a service account and restricted to
+      the Gemini API by default. This is what aistudio.google.com/apikey issues
+      today, and the only kind it will issue for a new key.
+    * `AIza…` — a **standard key**, the old format. Still accepted for now, but
+      only while restricted to the Gemini API, and Google stops accepting them
+      altogether in September 2026.
+
+    Neither shape is refused: a key is stored whatever it looks like, because
+    guessing at Google's format is what caused the original bug.
+    """
+    value = value.strip()
+    if value.startswith("AQ."):
+        return None
+    if value.startswith("AIza"):
+        return (
+            "That is an old-style standard key. It still works today only if you "
+            "have restricted it to the Gemini API, and Google stops accepting "
+            "standard keys altogether in September 2026. Create a replacement at "
+            "aistudio.google.com/apikey — new keys begin with AQ."
+        )
+    if value.startswith("ya29."):
+        return (
+            "That is a short-lived Google OAuth access token; it will stop working "
+            "within the hour. Get a proper key from aistudio.google.com/apikey."
+        )
+    return (
+        "That does not look like a Gemini API key. Keys from "
+        "aistudio.google.com/apikey begin with AQ. — saved anyway, in case Google "
+        "has changed the format again."
+    )
+
+
 def _friendly(exc: Exception) -> str:
     """Turn an SDK exception into something the operator can act on."""
     text = str(exc)
     lowered = text.lower()
+    # Both of these are checked before the generic key case. Google returns the
+    # same "invalid authentication credentials" text for either, which reads as a
+    # mistyped key when the real problem is the key's standing with Google — and
+    # no amount of re-pasting it will help.
+    if "api_key_service_blocked" in lowered:
+        return (
+            "Google recognises this key but is blocking it from the Gemini API. "
+            "That is set on Google's side, not here: open "
+            "aistudio.google.com/apikey, check the key is still listed and "
+            "restricted to the Gemini API, and that its project still has "
+            "billing enabled. If it is missing or flagged, create a new key. "
+            "Nothing was charged."
+        )
+    # The SDK always authenticates with the `x-goog-api-key` header, so this is
+    # the branch the operator actually reaches when a key has been revoked or
+    # blocked — Google only says so plainly on the header we do not use. Hence
+    # the checks below rather than a bare "wrong credential type".
+    if "access_token_type_unsupported" in lowered or "expected oauth 2" in lowered:
+        return (
+            "Google will not accept this key. Open aistudio.google.com/apikey and "
+            "check three things: the key is still listed there (Google withdraws "
+            "keys it finds published anywhere), it is restricted to the Gemini "
+            "API, and its project still has billing on. If it is missing or "
+            "flagged, make a new key — re-pasting a withdrawn one will not help. "
+            "Nothing was charged."
+        )
+    if "is not found for api version" in lowered or "is not supported for" in lowered:
+        missing = re.search(r"models/([\w.\-]+)", text)
+        name = missing.group(1) if missing else "that model"
+        return (
+            f"Google has no model called {name} any more. Open Settings → AI "
+            "models, press Refresh, and pick one from the list. Nothing was "
+            "charged."
+        )
     if "api key" in lowered or "unauthorized" in lowered or "401" in lowered:
         return "That API key was rejected. Check it in Settings."
     if "quota" in lowered or "429" in lowered or "resource_exhausted" in lowered:
@@ -141,6 +319,115 @@ def _record(result: AiResult) -> AiResult:
         status="ok" if result.ok else "failed",
     )
     return result
+
+
+# --- which models actually exist ------------------------------------------
+
+
+def _short(name: str) -> str:
+    """`models/gemini-2.5-flash` → `gemini-2.5-flash`."""
+    return name.split("/", 1)[-1]
+
+
+def available_models() -> list[dict[str, Any]]:
+    """Ask Google what this key can call. Free, and the only honest answer.
+
+    Guessing a model name is what broke this feature once already. The list is
+    fetched rather than hardcoded so the Settings screen shows what is really
+    there on the day the operator looks.
+    """
+    client = _client()
+    found: list[dict[str, Any]] = []
+    for model in client.models.list():
+        actions = {str(a) for a in (getattr(model, "supported_actions", None) or [])}
+        # An empty action list means the SDK did not report them; assume usable
+        # rather than hiding a model the operator can see in Google's console.
+        if actions and "generateContent" not in actions:
+            continue
+        name = _short(str(getattr(model, "name", "")))
+        if not name:
+            continue
+        found.append(
+            {
+                "name": name,
+                "label": str(getattr(model, "display_name", "") or name),
+                "description": str(getattr(model, "description", "") or ""),
+                # A heuristic, and the picker says so: Google does not declare
+                # "returns pictures" in the model list, and the name is the only
+                # signal that survives a rename.
+                "image_output": "image" in name,
+                "input_token_limit": getattr(model, "input_token_limit", None),
+            }
+        )
+    found.sort(key=lambda m: m["name"])
+    return found
+
+
+def model_settings(live: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """What the Settings screen shows. Works with no key — just no live list."""
+    names = {m["name"] for m in (live or [])}
+    return {
+        "roles": [
+            {
+                "key": role.key,
+                "label": role.label,
+                "description": role.description,
+                "needs_image": role.needs_image,
+                "chosen": model_for(role),
+                "default": role.default,
+                "is_default": model_for(role) == role.default,
+                # Only meaningful once a list has been fetched; the UI does not
+                # cry "missing" at a model it has simply never checked.
+                "confirmed": (model_for(role) in names) if names else None,
+                "cost_rupees": round(cost_of(role.key, batch=False) / 100, 2),
+            }
+            for role in ROLES
+        ],
+        "models": live or [],
+    }
+
+
+def resolve_models() -> dict[str, Any]:
+    """Repair any model choice Google no longer honours.
+
+    Called when the key is tested, which is the moment the operator is already
+    asking "does this work" — so a name that has been retired is fixed then and
+    there rather than surfacing as a 404 in the middle of a paid job.
+    """
+    live = available_models()
+    names = {m["name"] for m in live}
+    updates: dict[str, str] = {}
+    notes: list[str] = []
+
+    for role in ROLES:
+        current = model_for(role)
+        if current in names:
+            continue
+        replacement = next(
+            (candidate for candidate in role.fallbacks if candidate in names), None
+        )
+        if replacement is None:
+            # Last resort: anything of the right shape that does exist.
+            replacement = next(
+                (
+                    m["name"]
+                    for m in live
+                    if m["image_output"] == role.needs_image
+                ),
+                None,
+            )
+        if replacement is None:
+            notes.append(
+                f"{role.label}: {current} is gone and nothing here can replace it. "
+                "Pick a model by hand in Settings."
+            )
+            continue
+        updates[PREFERENCE_KEY[role.key]] = replacement
+        notes.append(f"{role.label}: {current} is gone — now using {replacement}.")
+
+    if updates:
+        db.set_preferences(updates)
+    return {"models": live, "changed": bool(updates), "notes": notes} | model_settings(live)
 
 
 def _extract_image(response: Any) -> tuple[bytes | None, str]:
@@ -179,10 +466,11 @@ def edit_photo(
     """Apply an instruction to a client photograph."""
     template = prompts.active_prompt("photo-edit")
     text = prompts.render(template["body"], values)
+    model = model_for("photo")
     result = AiResult(
         ok=False,
         feature="photo-edit",
-        model=PHOTO_MODEL,
+        model=model,
         batch=batch,
         prompt_used=text,
     )
@@ -194,7 +482,7 @@ def edit_photo(
         from google.genai import types
 
         response = _client().models.generate_content(
-            model=PHOTO_MODEL,
+            model=model,
             contents=[
                 types.Part.from_bytes(data=image, mime_type=media_type),
                 text,
@@ -216,7 +504,7 @@ def edit_photo(
     result.ok = True
     result.image = data
     result.media_type = mime
-    result.cost_paise = cost_of(PHOTO_MODEL, batch)
+    result.cost_paise = cost_of("photo", batch)
     result.warnings.append(
         "Google embeds an invisible SynthID watermark in AI images. It does not "
         "affect printing."
@@ -227,23 +515,59 @@ def edit_photo(
 # --- poster artwork -------------------------------------------------------
 
 
-def generate_artwork(values: dict[str, str], batch: bool = True) -> AiResult:
-    """Make a background picture. Never any words in it — the app draws those."""
+def artwork_prompt(values: dict[str, str], style_key: str | None = None) -> str:
+    """The exact words that will be sent, without sending them.
+
+    Free, so the designer can show the operator the finished prompt before
+    anything is spent — the style owns the structure, the operator owns the
+    copy, and neither should have to take the other on trust.
+    """
+    if style_key:
+        return styles.build_prompt(styles.by_key(style_key), values)
     template = prompts.active_prompt("poster-artwork")
-    text = prompts.render(template["body"], values)
+    return prompts.render(template["body"], values)
+
+
+def generate_artwork(
+    values: dict[str, str], batch: bool = True, style_key: str | None = None
+) -> AiResult:
+    """Make a background picture. Never any words in it — the app draws those.
+
+    With a style, the picture is generated *from the poster's own copy* through
+    that style's fixed prompt structure. Without one, this falls back to the
+    prompt library's free-form `poster-artwork` template, which is still how the
+    photo-edit screen and any older saved job reach it.
+    """
+    model = model_for("artwork")
+    try:
+        text = artwork_prompt(values, style_key)
+    except (db.NotFound, styles.StyleError) as exc:
+        return AiResult(
+            ok=False,
+            feature="poster-artwork",
+            model=model,
+            batch=batch,
+            error=f"That design style is not usable: {exc}",
+        )
+
     result = AiResult(
         ok=False,
         feature="poster-artwork",
-        model=ARTWORK_MODEL,
+        model=model,
         batch=batch,
         prompt_used=text,
     )
-    if not values.get("subject", "").strip():
-        result.error = "Say what the picture should be of."
+    # A style poster is described by its headline; a free-form one by a subject.
+    if not (values.get("subject") or values.get("headline") or "").strip():
+        result.error = (
+            "Write the poster's headline first — the picture is made from it."
+            if style_key
+            else "Say what the picture should be of."
+        )
         return result
 
     try:
-        response = _client().models.generate_content(model=ARTWORK_MODEL, contents=text)
+        response = _client().models.generate_content(model=model, contents=text)
     except AiError as exc:
         result.error = str(exc)
         return result
@@ -260,7 +584,7 @@ def generate_artwork(values: dict[str, str], batch: bool = True) -> AiResult:
     result.ok = True
     result.image = data
     result.media_type = mime
-    result.cost_paise = cost_of(ARTWORK_MODEL, batch)
+    result.cost_paise = cost_of("artwork", batch)
     result.warnings.append(
         "Google embeds an invisible SynthID watermark in AI images. It does not "
         "affect printing."
@@ -301,10 +625,11 @@ def plan_layout(values: dict[str, str]) -> AiResult:
     """
     template = prompts.active_prompt("poster-layout")
     text = prompts.render(template["body"], values)
+    model = model_for("layout")
     result = AiResult(
         ok=False,
         feature="poster-layout",
-        model=LAYOUT_MODEL,
+        model=model,
         batch=False,
         prompt_used=text,
     )
@@ -313,7 +638,7 @@ def plan_layout(values: dict[str, str]) -> AiResult:
         return result
 
     try:
-        response = _client().models.generate_content(model=LAYOUT_MODEL, contents=text)
+        response = _client().models.generate_content(model=model, contents=text)
     except AiError as exc:
         result.error = str(exc)
         return result
@@ -330,7 +655,7 @@ def plan_layout(values: dict[str, str]) -> AiResult:
 
     result.ok = True
     result.layout = layout
-    result.cost_paise = cost_of(LAYOUT_MODEL, False)
+    result.cost_paise = cost_of("layout", False)
     verified, notes = verify_text_unchanged(layout, values)
     result.layout = verified
     result.warnings.extend(notes)

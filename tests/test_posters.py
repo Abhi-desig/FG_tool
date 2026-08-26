@@ -363,3 +363,108 @@ def test_the_module_never_rasterises() -> None:
         assert "def render_png" not in text, (
             "no raster path may exist while Pillow cannot shape Malayalam"
         )
+
+
+# --- pasted copy ----------------------------------------------------------
+#
+# The operator pastes one WhatsApp message and the app decides which line is
+# which. A wrong guess is visible and correctable; a *dropped* line is neither,
+# and it reaches the printer.
+
+
+def _roles(text: str) -> dict[str, str]:
+    return {row["role"]: row["text"] for row in posters.split_copy(text)}
+
+
+def test_no_line_is_ever_dropped() -> None:
+    """The one guarantee that matters — a lost line reaches the printer."""
+    pasted = "Line one\nLine two\nLine three\n50% off\n9847 000 000\nExtra note"
+    out = posters.split_copy(pasted)
+    assert [row["text"] for row in out] == [
+        "Line one",
+        "Line two",
+        "Line three",
+        "50% off",
+        "9847 000 000",
+        "Extra note",
+    ]
+
+
+def test_a_typical_whatsapp_message_is_sorted() -> None:
+    roles = _roles("ഓണം\nഗ്രാൻഡ് സെയിൽ\n50% OFF\n9847 000 000")
+    assert roles["occasion"] == "ഓണം"
+    assert roles["headline"] == "ഗ്രാൻഡ് സെയിൽ"
+    assert roles["offer"] == "50% OFF"
+    assert roles["phone"] == "9847 000 000"
+
+
+def test_a_phone_number_is_found_wherever_it_sits() -> None:
+    for pasted in (
+        "Call +91 98470 12345\nGRAND SALE",
+        "GRAND SALE\nPh: 9847000000",
+        "GRAND SALE\n9847-000-000\nFlat 20% off",
+    ):
+        assert "phone" in _roles(pasted), pasted
+
+
+def test_a_year_is_not_mistaken_for_a_phone_number() -> None:
+    assert _roles("Since 1998\nGRAND SALE").get("phone") is None
+
+
+def test_the_first_line_leads_unless_it_names_a_festival() -> None:
+    assert _roles("GRAND SALE\nSarees and more")["headline"] == "GRAND SALE"
+    assert _roles("Onam\nGRAND SALE")["occasion"] == "Onam"
+
+
+def test_grand_sale_is_a_headline_not_an_occasion() -> None:
+    """"Sale" is deliberately not an occasion word; tagging it pushes the real
+    headline down a slot and the poster comes out with the wrong big line."""
+    assert _roles("GRAND SALE\n50% off")["headline"] == "GRAND SALE"
+
+
+def test_only_the_first_candidate_takes_a_role() -> None:
+    out = posters.split_copy("Shop now\n9847 000 000\n9847 111 111")
+    phones = [row for row in out if row["role"] == "phone"]
+    assert len(phones) == 1
+    assert out[2]["role"] == "free", "the second number stays as an extra line"
+
+
+def test_a_single_line_becomes_the_headline() -> None:
+    assert _roles("Just this")["headline"] == "Just this"
+
+
+def test_blank_lines_and_padding_are_ignored() -> None:
+    out = posters.split_copy("\n\n  GRAND SALE  \n\n   \n 50% off \n")
+    assert [row["text"] for row in out] == ["GRAND SALE", "50% off"]
+
+
+def test_empty_input_is_not_an_error() -> None:
+    assert posters.split_copy("   \n\n ") == []
+
+
+def test_a_runaway_paste_is_capped() -> None:
+    out = posters.split_copy("\n".join(f"line {i}" for i in range(200)))
+    assert len(out) == posters.MAX_COPY_LINES
+
+
+def test_a_figure_beats_the_word_offer() -> None:
+    """"ഓണം ഓഫർ" is the festival wearing the word, not the price.
+
+    Taking the first line containing a word for "offer" put the festival name in
+    the price slot and left the actual price as a spare line.
+    """
+    roles = _roles(
+        "ഓണം ഓഫർ\nഗ്രാൻഡ് സെയിൽ\nFlat 50% OFF on all sarees\n9847 000 000"
+    )
+    assert roles["offer"] == "Flat 50% OFF on all sarees"
+    assert roles["occasion"] == "ഓണം ഓഫർ"
+    assert roles["headline"] == "ഗ്രാൻഡ് സെയിൽ"
+
+
+def test_a_word_still_wins_when_there_is_no_figure() -> None:
+    assert _roles("GRAND SALE\nFree gift inside")["offer"] == "Free gift inside"
+
+
+def test_a_long_first_line_naming_a_festival_is_the_headline() -> None:
+    """A kicker is two words. "Onam Mega Sale" is the big line, not a label."""
+    assert _roles("Onam Mega Sale\nBig discounts inside")["headline"] == "Onam Mega Sale"

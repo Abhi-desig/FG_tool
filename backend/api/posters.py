@@ -35,6 +35,7 @@ class TextBlockIn(BaseModel):
     align: Literal["left", "centre", "right"] = "centre"
     mode: Literal["unicode", "ascii"] = "unicode"
     shadow: bool = True
+    role: Literal["headline", "offer", "occasion", "phone", "free"] = "free"
 
     def to_block(self) -> posters.TextBlock:
         return posters.TextBlock(**self.model_dump())
@@ -96,6 +97,21 @@ def analyse(file: Annotated[UploadFile, File()]) -> dict[str, object]:
         "height": image.height,
         "calm_regions": [r.__dict__ for r in regions],
     }
+
+
+class CopyIn(BaseModel):
+    text: str = Field(max_length=8000)
+
+
+@router.post("/posters/split-copy")
+def split_copy(body: CopyIn) -> dict[str, object]:
+    """Sort one pasted WhatsApp message into the lines a poster is made of.
+
+    Offline and free. Every line comes back tagged with a guess, in the order it
+    was pasted — nothing is dropped, and the designer shows the guesses so the
+    operator can correct any of them.
+    """
+    return {"lines": posters.split_copy(body.text)}
 
 
 class CheckRequest(BaseModel):

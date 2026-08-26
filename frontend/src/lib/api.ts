@@ -433,6 +433,9 @@ export interface CanvasPreset {
   aspect: number
 }
 
+/** What a line *is* on the poster. A style colours the headline, not block `t3`. */
+export type BlockRole = "headline" | "offer" | "occasion" | "phone" | "free"
+
 export interface PosterBlock {
   id: string
   text: string
@@ -445,6 +448,7 @@ export interface PosterBlock {
   align: BlockAlign
   mode: TextMode
   shadow: boolean
+  role: BlockRole
 }
 
 export interface PosterLayout {
@@ -465,6 +469,23 @@ export function posterPresets(): Promise<{
   fonts: { unicode: string; ascii: string }
 }> {
   return request("/api/posters/presets")
+}
+
+/** One line of a pasted message, and the part of the poster it was guessed to be. */
+export interface CopyLine {
+  text: string
+  role: BlockRole
+}
+
+/**
+ * Sort one pasted WhatsApp message into the lines a poster is made of.
+ * Offline and free. Every line comes back, in order — nothing is dropped.
+ */
+export function splitCopy(text: string): Promise<{ lines: CopyLine[] }> {
+  return request("/api/posters/split-copy", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  })
 }
 
 export function checkPoster(layout: PosterLayout): Promise<PosterCheck> {
@@ -568,7 +589,10 @@ export function listKeys(): Promise<{
   return request("/api/settings/keys")
 }
 
-export function saveKey(name: string, value: string): Promise<{ keys: KeyRow[] }> {
+export function saveKey(
+  name: string,
+  value: string,
+): Promise<{ keys: KeyRow[]; warning: string | null }> {
   return request(`/api/settings/keys/${name}`, {
     method: "PUT",
     body: JSON.stringify({ value }),
@@ -579,9 +603,13 @@ export function removeKey(name: string): Promise<{ keys: KeyRow[] }> {
   return request(`/api/settings/keys/${name}`, { method: "DELETE" })
 }
 
-export function testKey(
-  name: string,
-): Promise<{ ok: boolean; message: string; keys: KeyRow[] }> {
+export function testKey(name: string): Promise<{
+  ok: boolean
+  message: string
+  keys: KeyRow[]
+  /** What testing repaired — a model name Google has since retired. */
+  notes?: string[]
+}> {
   return request(`/api/settings/keys/${name}/test`, { method: "POST" })
 }
 
@@ -648,15 +676,150 @@ export function editPhoto(
   return upload<AiResult>("/api/ai/photo-edit", form)
 }
 
-export function generateArtwork(body: {
-  subject: string
+/**
+ * A picture request described by the poster's own copy.
+ *
+ * With `style_key`, the shop's saved prompt structure for that look is filled
+ * in with the copy below — which is why the picture ends up about the message
+ * rather than about whatever the operator managed to describe in a hurry.
+ */
+export interface ArtworkRequest {
+  style_key?: string | null
+  headline?: string
+  offer?: string
+  occasion?: string
+  phone?: string
+  /** The operator's own idea for the picture, when they have one. */
+  idea?: string
+  subject?: string
   style?: string
   palette?: string
   aspect?: string
   batch?: boolean
-}): Promise<AiResult> {
+}
+
+export function generateArtwork(body: ArtworkRequest): Promise<AiResult> {
   return request<AiResult>("/api/ai/artwork", {
     method: "POST",
     body: JSON.stringify(body),
+  })
+}
+
+/** Free. The exact words that would be sent, so nothing is hidden. */
+export function artworkPrompt(body: ArtworkRequest): Promise<{
+  prompt: string
+  style_key: string | null
+  estimate: { cost_rupees: number; cost_paise: number; model: string }
+}> {
+  return request("/api/ai/artwork/prompt", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+// --- design styles --------------------------------------------------------
+
+/** How the words are styled when a look is chosen. Half a style is not a style. */
+export interface StyleTextDefault {
+  colour?: string
+  size?: BlockSize
+  weight?: "regular" | "bold"
+  align?: BlockAlign
+}
+
+export interface StyleTextDefaults {
+  background_colour?: string
+  headline?: StyleTextDefault
+  offer?: StyleTextDefault
+  occasion?: StyleTextDefault
+  phone?: StyleTextDefault
+}
+
+export interface DesignStyle {
+  id: number
+  key: string
+  name: string
+  description: string
+  body: string
+  palette: string
+  swatches: string[]
+  text_defaults: StyleTextDefaults
+  is_default: boolean
+  sort_order: number
+  updated_at: string
+}
+
+export function listStyles(): Promise<{
+  styles: DesignStyle[]
+  variables: string[]
+  required: string[]
+}> {
+  return request("/api/styles")
+}
+
+export function validateStyle(body: string): Promise<{ problems: string[] }> {
+  return request("/api/styles/validate", {
+    method: "POST",
+    body: JSON.stringify({ key: "check", name: "check", body }),
+  })
+}
+
+export function saveStyle(
+  style: Omit<DesignStyle, "id" | "is_default" | "sort_order" | "updated_at">,
+  styleId?: number,
+): Promise<{ style: DesignStyle; problems: string[] }> {
+  return request("/api/styles", {
+    method: "PUT",
+    body: JSON.stringify({ ...style, style_id: styleId ?? null }),
+  })
+}
+
+export function restoreStyleDefault(id: number): Promise<{ style: DesignStyle }> {
+  return request(`/api/styles/${id}/restore-default`, { method: "POST" })
+}
+
+export function deleteStyle(id: number): Promise<{ styles: DesignStyle[] }> {
+  return request(`/api/styles/${id}`, { method: "DELETE" })
+}
+
+// --- which model does which job -------------------------------------------
+
+export interface AiModel {
+  name: string
+  label: string
+  description: string
+  image_output: boolean
+  input_token_limit: number | null
+}
+
+export interface AiRole {
+  key: "artwork" | "photo" | "layout"
+  label: string
+  description: string
+  needs_image: boolean
+  chosen: string
+  default: string
+  is_default: boolean
+  /** null until a live list has been fetched — never "missing" on no evidence. */
+  confirmed: boolean | null
+  cost_rupees: number
+}
+
+export interface AiModelSettings {
+  roles: AiRole[]
+  models: AiModel[]
+  error?: string | null
+}
+
+export function aiModels(refresh = false): Promise<AiModelSettings> {
+  return request(`/api/ai/models${refresh ? "?refresh=true" : ""}`)
+}
+
+export function setAiModels(
+  choices: Partial<Record<AiRole["key"], string>>,
+): Promise<AiModelSettings> {
+  return request("/api/ai/models", {
+    method: "PUT",
+    body: JSON.stringify(choices),
   })
 }

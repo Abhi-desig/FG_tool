@@ -508,6 +508,54 @@ right. That is the first item on the Phase 5 exit gate.
 
 ---
 
+## ADR-026 · A Gemini model name is a setting, not a constant
+
+**Date:** 2026-08-23
+**Context:** ADR-025 predicted the first live call would fail on a response
+shape. It failed earlier and more stupidly than that: `gemini-3-flash`,
+`gemini-3-pro-image` and `gemini-3.1-flash-image` were written from memory and
+**none of the three exist**. The operator saw *"models/gemini-3-flash is not
+found for API version v1beta"* and reasonably concluded their key was bad.
+**Decision:** Model names move out of `ai.py` constants and into preferences
+(`ai_model_artwork`, `ai_model_photo`, `ai_model_layout`), chosen in Settings
+from a list fetched live from `ModelService.ListModels`. The constants that
+remain are defaults only. Testing the key calls `resolve_models()`, which
+replaces any configured name Google no longer lists.
+**Reasoning:** Google renames and retires these on its own schedule. A name that
+has moved should cost the operator a dropdown, not a code change and a support
+conversation — and this shop has no one to have that conversation with.
+**Consequences:** Prices are keyed by *role* rather than by model, because one
+image model now serves both artwork and photo editing at different sizes. The
+figures stay estimates; `budget.is_estimate` was already true and still is.
+**What this does not fix:** the defaults are still unverified guesses. They are
+the most conservative names available and the picker exists precisely because
+they may be wrong too.
+
+---
+
+## ADR-027 · A design style owns both the prompt and the text colours
+
+**Date:** 2026-08-23
+**Context:** The poster screen asked for the copy *and* a separate "Picture of…"
+description. The operator wrote the poster twice and nothing made the two halves
+agree, so the picture was routinely unrelated to the words printed over it.
+**Decision:** A **design style** is a first-class saved object: a fixed prompt
+structure the shop owns, plus the colours and sizes its words take on. Choosing
+one in step 2 of the designer repaints the text *and* decides how the picture is
+asked for. The poster's own copy is substituted into the style's prompt, so the
+brief for the picture is the message on the poster.
+**Reasoning:** Keeping the two apart made them a matter of the operator's memory.
+A look that colours the headline but says nothing about the picture — or the
+reverse — is half a style, and the half that is missing is the one that goes
+wrong at the printer.
+**Consequences:** `poster_styles` in SQLite, six seeded looks, and a `role` field
+on every text block so a style knows which line is the headline. Every seeded
+body forbids lettering three times and `styles.validate()` refuses to save one
+that does not, because a model handed a Malayalam headline will draw it, and it
+will draw it wrong.
+
+---
+
 ## ADR-010 · Docs before code
 
 **Date:** 2026-08-22

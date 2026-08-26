@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import html
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -119,6 +120,10 @@ class TextBlock:
     mode: TextMode = "unicode"
     # A dark rule behind light text, for photos too busy to read against.
     shadow: bool = True
+    # What this line *is* on the poster. Nothing in this module reads it — it
+    # exists so a design style knows which line is the headline when it applies
+    # its colours, and so that survives a round trip through auto-placement.
+    role: str = "free"
 
     def clamp(self) -> TextBlock:
         self.x = min(max(self.x, 0.0), 1.0)
@@ -410,6 +415,161 @@ def render_svg(
     return "\n".join(parts)
 
 
+# --- pasted copy ----------------------------------------------------------
+#
+# Work arrives as one WhatsApp message, not as four labelled fields. Typing it
+# back out line by line is the slowest part of the job and the one where a
+# phone number gets a digit wrong, so the operator pastes the lot and this
+# guesses which line is which.
+#
+# **Nothing is ever dropped.** A line this cannot place becomes an extra line on
+# the poster rather than disappearing — losing a client's wording silently is
+# exactly the expensive, invisible error the shop cannot afford. The guesses are
+# shown and every one is correctable.
+
+# A run of digits long enough to be a phone number, however it is spaced.
+_PHONE_RUN = re.compile(r"\+?\d[\d\s\-().]{7,}\d")
+
+# Strong price signals. `%` and a currency mark are worth more than any word.
+_MONEY = re.compile(r"[%₹]|(?<![A-Za-z])(?:rs|inr)\.?\s*\d", re.IGNORECASE)
+
+_OFFER_WORDS = (
+    "off",
+    "offer",
+    "discount",
+    "free",
+    "upto",
+    "up to",
+    "flat",
+    "combo",
+    "buy 1",
+    "buy one",
+    "ഓഫർ",
+    "കിഴിവ്",
+    "സൗജന്യ",
+)
+
+# Deliberately not "sale" — GRAND SALE is a headline, not an occasion, and
+# tagging it as one pushes the real headline down a slot.
+_OCCASION_WORDS = (
+    "onam",
+    "vishu",
+    "diwali",
+    "deepavali",
+    "christmas",
+    "xmas",
+    "new year",
+    "eid",
+    "ramadan",
+    "ramzan",
+    "bakrid",
+    "navratri",
+    "pooja",
+    "puja",
+    "wedding",
+    "anniversary",
+    "birthday",
+    "inauguration",
+    "grand opening",
+    "ഓണം",
+    "വിഷു",
+    "ദീപാവലി",
+    "ക്രിസ്മസ്",
+    "പെരുന്നാൾ",
+    "വിവാഹ",
+)
+
+MAX_COPY_LINES = 40
+
+
+def _looks_like_phone(line: str) -> bool:
+    """Ten to thirteen digits in one run. An Indian mobile, or one with +91."""
+    match = _PHONE_RUN.search(line)
+    if match is None:
+        return False
+    digits = sum(character.isdigit() for character in match.group())
+    return 10 <= digits <= 13
+
+
+def _offer_strength(line: str) -> int:
+    """How much this line looks like the price, 2 (certain) down to 0 (not).
+
+    Ranked rather than a yes/no because the word alone is weak evidence: in
+    *"ഓണം ഓഫർ / Flat 50% OFF on all sarees"* both lines contain a word for
+    offer, and taking the first one put the festival name in the price slot and
+    left the actual price as a spare line. A figure beats a word.
+    """
+    if _MONEY.search(line):
+        return 2
+    lowered = line.lower()
+    if any(word in lowered for word in _OFFER_WORDS):
+        # "Onam offer" is the occasion wearing the word, not the price.
+        return 0 if _looks_like_occasion(line) else 1
+    return 0
+
+
+def _looks_like_occasion(line: str) -> bool:
+    lowered = line.lower()
+    return any(word in lowered for word in _OCCASION_WORDS)
+
+
+def split_copy(text: str) -> list[dict[str, str]]:
+    """Sort one pasted message into the lines a poster is made of.
+
+    Returns every line in the order it was pasted, each tagged with the role it
+    was guessed to be — `headline`, `offer`, `occasion`, `phone`, or `free` for
+    anything left over. Only the first candidate takes a role; a second phone
+    number stays as an extra line rather than replacing the first.
+    """
+    lines = [stripped for raw in text.splitlines() if (stripped := raw.strip())]
+    if not lines:
+        return []
+    lines = lines[:MAX_COPY_LINES]
+
+    roles: list[str] = ["free"] * len(lines)
+
+    def free_indexes() -> list[int]:
+        return [i for i, role in enumerate(roles) if role == "free"]
+
+    # 1. The phone number, by shape. Position cannot mislead it.
+    for index in free_indexes():
+        if _looks_like_phone(lines[index]):
+            roles[index] = "phone"
+            break
+
+    # 2. The price. Strongest evidence wins, earliest line breaking a tie.
+    scored = [(index, _offer_strength(lines[index])) for index in free_indexes()]
+    best = max(scored, key=lambda pair: pair[1], default=(0, 0))
+    if best[1] > 0:
+        roles[best[0]] = "offer"
+
+    # 3. The occasion. A short festival name on the first remaining line is a
+    #    kicker above the headline — the commonest layout in this shop's work.
+    #    Anywhere else it is the headline that leads, because that is how people
+    #    write a message, so the rest of the lines are only scanned afterwards.
+    remaining = free_indexes()
+    first = remaining[0] if remaining else None
+    if (
+        first is not None
+        and len(remaining) > 1
+        and _looks_like_occasion(lines[first])
+        and len(lines[first].split()) <= 2
+    ):
+        roles[first] = "occasion"
+    else:
+        for index in remaining[1:]:
+            if _looks_like_occasion(lines[index]):
+                roles[index] = "occasion"
+                break
+
+    # 4. The headline is whatever still leads.
+    remaining = free_indexes()
+    if remaining:
+        roles[remaining[0]] = "headline"
+
+    return [{"text": line, "role": role} for line, role in zip(lines, roles, strict=True)]
+
+
 def describe_presets() -> list[dict[str, object]]:
     return [
         {
@@ -476,5 +636,6 @@ __all__ = [
     "place_in_calm_space",
     "render_svg",
     "safe_zone_report",
+    "split_copy",
     "suggest_colour",
 ]

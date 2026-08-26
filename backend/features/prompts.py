@@ -19,14 +19,16 @@ shop can produce Malayalam posters at all (ROADMAP.md Phase 4).
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from backend import db
+from backend.templating import VARIABLE, render, variables_in
 
-VARIABLE = re.compile(r"\{\{\s*([a-z_][a-z0-9_]*)\s*\}\}")
+# Substitution moved to `backend.templating` when design styles started needing
+# the same rules. Re-exported here so `prompts.render(...)` keeps working.
+__all__ = ["VARIABLE", "render", "variables_in"]
 
 
 class PromptError(ValueError):
@@ -126,16 +128,6 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def variables_in(body: str) -> list[str]:
-    """Distinct `{{variable}}` names, in order of first appearance."""
-    seen: list[str] = []
-    for match in VARIABLE.finditer(body):
-        name = match.group(1)
-        if name not in seen:
-            seen.append(name)
-    return seen
-
-
 def validate(scope: str, body: str) -> list[str]:
     """Problems with a template, in words the operator can act on.
 
@@ -163,26 +155,6 @@ def validate(scope: str, body: str) -> list[str]:
     if not body.strip():
         problems.append("The prompt is empty.")
     return problems
-
-
-def render(body: str, values: dict[str, str]) -> str:
-    """Substitute values, leaving nothing unresolved.
-
-    An unfilled `{{variable}}` reaching a paid API call would waste money on a
-    confused request, so a missing value becomes an empty string and the line it
-    sits on is dropped if that leaves it bare.
-    """
-    def swap(match: re.Match[str]) -> str:
-        return (values.get(match.group(1)) or "").strip()
-
-    filled = VARIABLE.sub(swap, body)
-    # Drop "Label:" lines whose value turned out empty — they only confuse.
-    kept = [
-        line
-        for line in filled.splitlines()
-        if not re.fullmatch(r"\s*[A-Z][A-Za-z ]{0,24}:\s*", line)
-    ]
-    return "\n".join(kept).strip()
 
 
 def seed_defaults() -> None:

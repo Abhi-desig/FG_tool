@@ -118,7 +118,9 @@ def test_estimate_is_free_and_states_the_cost() -> None:
         "/api/ai/estimate", params={"feature": "poster-artwork", "batch": True}
     ).json()
     assert body["cost_rupees"] == 6.0
-    assert body["model"] == "gemini-3-pro-image"
+    # The name itself is a setting, not a constant — pinning a literal here is
+    # what let three models that never existed ship in the first place.
+    assert body["model"] == ai.model_for("artwork")
 
 
 def test_estimate_shows_batch_is_half_price() -> None:
