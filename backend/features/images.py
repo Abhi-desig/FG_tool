@@ -29,6 +29,8 @@ from __future__ import annotations
 import io
 import logging
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -89,6 +91,10 @@ TILE_SECONDS = {"gpu": 0.06, "cpu": 2.5}
 CUTOUT_SECONDS = {"gpu": 60.0, "cpu": 300.0}
 
 ALLOWED_FORMATS = {"PNG", "JPEG", "TIFF", "WEBP", "BMP"}
+
+# Read size for spooling an upload to disk. Large enough that a 200 MB scan is a
+# few hundred reads, small enough to be invisible in memory.
+SPOOL_CHUNK_BYTES = 1024 * 1024
 
 
 class ImageError(ValueError):
@@ -165,6 +171,110 @@ def _check_dimensions(size: tuple[int, int]) -> None:
             f"is already larger than anything a print job needs. Export a "
             f"smaller version first."
         )
+
+
+def spool(stream: Any, limit: int, destination: Path) -> int:
+    """Copy an upload to disk in chunks. Returns the byte count.
+
+    **Why disk and not bytes.** `_read_upload` held the whole file in memory
+    while the decoded image was captured in the queued job's closure, so a queue
+    of large jobs stacked decoded images on a 12 GB machine (NEXT.md 2.1). With
+    the file on disk, a queued job holds a path — a few dozen bytes — and decodes
+    only when the single worker reaches it.
+
+    Raises `ImageError` past `limit` rather than filling the disk. The partial
+    file is the caller's to clean up; `api/images` does that in a `finally`.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with destination.open("wb") as out:
+        while True:
+            chunk = stream.read(SPOOL_CHUNK_BYTES)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > limit:
+                raise ImageError(
+                    f"That file is over {limit // (1024 * 1024)} MB. "
+                    f"Export a smaller version first."
+                )
+            out.write(chunk)
+    if written == 0:
+        raise ImageError("The uploaded file was empty.")
+    return written
+
+
+@contextmanager
+def _header(path: Path) -> Iterator[Image.Image]:
+    """Open just the header, with Pillow's bomb guard out of the way.
+
+    `Image.open` parses the header only — it allocates no pixels — but Pillow's
+    own `MAX_IMAGE_PIXELS` check fires there, raising before the size can be read
+    and turning our precise refusal ("that image is 24000×24000 — 576 megapixels,
+    the limit is 150") into a useless "that file is not a readable image".
+
+    So the guard is lifted for the header read and `_check_dimensions` produces
+    the message instead. Nothing is decoded inside this block, and the limit is
+    restored before anything could be.
+    """
+    ceiling = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = None
+    try:
+        with Image.open(path) as opened:
+            yield opened
+    finally:
+        Image.MAX_IMAGE_PIXELS = ceiling
+
+
+def inspect_header(path: Path) -> ImageFacts:
+    """Read size and format from the header alone, without decoding.
+
+    Cheap enough to run on every upload, which is what makes the pixel caps in
+    `_check_dimensions` free — they are enforced before anything is decoded.
+    """
+    try:
+        with _header(path) as probe:
+            fmt = (probe.format or "").upper()
+            size = probe.size
+            mode = probe.mode
+            dpi = probe.info.get("dpi")
+    except ImageError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - Pillow raises many types here
+        raise ImageError("That file is not a readable image.") from exc
+
+    if fmt not in ALLOWED_FORMATS:
+        raise ImageError(
+            f"{fmt or 'Unknown'} images are not supported. "
+            f"Use {', '.join(sorted(ALLOWED_FORMATS))}."
+        )
+    _check_dimensions(size)
+
+    return ImageFacts(
+        width=size[0],
+        height=size[1],
+        mode=mode,
+        format=fmt,
+        has_alpha=mode in {"RGBA", "LA", "PA"} or "transparency" in mode,
+        embedded_dpi=(float(dpi[0]), float(dpi[1])) if dpi else None,
+        megapixels=round(size[0] * size[1] / 1_000_000, 2),
+    )
+
+
+def load_path(path: Path) -> Image.Image:
+    """Decode a spooled upload, with the same guards `load` applies to bytes."""
+    inspect_header(path)
+    try:
+        image = Image.open(path)
+        image.load()
+    except Image.DecompressionBombError as exc:
+        raise ImageError(
+            "That image is too large to open safely — it decodes to far more "
+            "pixels than its file size suggests."
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise ImageError("That image could not be decoded.") from exc
+    return image
 
 
 def facts(image: Image.Image) -> ImageFacts:

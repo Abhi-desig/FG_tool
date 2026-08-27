@@ -443,3 +443,94 @@ def test_a_fresh_job_is_never_swept() -> None:
     main.sweep_expired_jobs()
     assert directory.exists(), "a result the operator may still want was deleted"
     assert job.files_deleted is False
+
+
+# --- uploads go to disk, not into RAM (NEXT.md 2.1) ----------------------
+
+
+def test_an_upload_is_spooled_not_held_in_memory() -> None:
+    """A queued job must hold a path, not a decoded image.
+
+    `_read_upload` held the whole file in memory while the decoded image was
+    captured in the queued job's closure, so a queue of large jobs stacked
+    decoded images on a 12 GB machine.
+    """
+    scratch = config.WORK_DIR / "uploads"
+    before = set(scratch.iterdir()) if scratch.is_dir() else set()
+
+    started = client.post(
+        "/api/images/upscale", files=upload(120, 100), data={"scale": "2x"}
+    ).json()
+
+    # A directory appeared for this upload while the job is queued or running.
+    if scratch.is_dir():
+        assert set(scratch.iterdir()) >= before
+
+    done = wait_for(started["id"])
+    assert done["status"] == "done", done
+    # And it is gone once the worker has decoded it — client artwork does not
+    # linger (SECURITY.md §5).
+    remaining = set(scratch.iterdir()) if scratch.is_dir() else set()
+    assert remaining <= before, f"spooled upload was left behind: {remaining - before}"
+
+
+def test_spooling_refuses_past_the_byte_cap(tmp_path) -> None:
+    """A hard cap while writing, so a runaway upload cannot fill the disk."""
+    stream = io.BytesIO(b"x" * 5000)
+    with pytest.raises(images.ImageError, match="MB"):
+        images.spool(stream, 1000, tmp_path / "out.bin")
+
+
+def test_spooling_refuses_an_empty_upload(tmp_path) -> None:
+    with pytest.raises(images.ImageError, match="empty"):
+        images.spool(io.BytesIO(b""), 1_000_000, tmp_path / "out.bin")
+
+
+def test_spooling_round_trips_the_bytes(tmp_path) -> None:
+    data = png(64, 48)
+    written = images.spool(io.BytesIO(data), 10_000_000, tmp_path / "img.png")
+    assert written == len(data)
+    assert (tmp_path / "img.png").read_bytes() == data
+
+
+def test_the_header_is_read_without_decoding(tmp_path) -> None:
+    """This is what makes the pixel caps free — no decode to reach them."""
+    path = tmp_path / "img.png"
+    path.write_bytes(png(320, 240))
+    facts = images.inspect_header(path)
+    assert (facts.width, facts.height) == (320, 240)
+    assert facts.format == "PNG"
+
+
+def test_an_oversized_spooled_file_is_refused_from_its_header(tmp_path) -> None:
+    path = tmp_path / "bomb.png"
+    Image.new("L", (18_000, 18_000), 0).save(path, format="PNG")
+    assert path.stat().st_size < 5_000_000, "fixture is not a compression bomb"
+    with pytest.raises(images.ImageError):
+        images.inspect_header(path)
+
+
+def test_an_oversized_upload_is_refused_by_the_route() -> None:
+    """End to end: it must never reach a job at all."""
+    buffer = io.BytesIO()
+    Image.new("L", (18_000, 18_000), 0).save(buffer, format="PNG")
+    response = client.post(
+        "/api/images/cutout",
+        files={"file": ("bomb.png", buffer.getvalue(), "image/png")},
+    )
+    assert response.status_code == 400
+    assert "megapixels" in response.json()["detail"].lower()
+
+
+def test_the_sweep_clears_a_straggler_upload() -> None:
+    """The backstop for a process that died between spooling and decoding."""
+    scratch = config.WORK_DIR / "uploads" / "straggler"
+    scratch.mkdir(parents=True, exist_ok=True)
+    (scratch / "source.png").write_bytes(png())
+    import os
+
+    old = time.time() - 3601
+    os.utime(scratch, (old, old))
+
+    main.sweep_expired_jobs()
+    assert not scratch.exists(), "a client photograph was left on disk"

@@ -8,6 +8,8 @@ blocked request.
 from __future__ import annotations
 
 import shutil
+import uuid
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
@@ -18,6 +20,10 @@ from backend import config, jobs, models
 from backend.features import images, printsize
 
 router = APIRouter(prefix="/api", tags=["images"])
+
+# Spooled uploads live here until their job finishes. Named so `main.py`'s sweep
+# can find stragglers left by a power cut.
+UPLOAD_SCRATCH = "uploads"
 
 
 def _read_upload(upload: UploadFile) -> bytes:
@@ -39,6 +45,37 @@ def _open(data: bytes) -> images.Image.Image:
         return images.load(data)
     except images.ImageError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+def _spool_upload(upload: UploadFile, stem: str) -> Path:
+    """Write an upload to a scratch file, validated from its header.
+
+    Deliberately not decoded here. `images.inspect_header` reads the size and
+    format from the header, which is enough to refuse a bomb or an unsupported
+    type; the pixels are only materialised when the worker reaches the job.
+
+    The scratch directory is removed by the worker when the job ends, and by the
+    sweep in `main.py` if the process dies first (SECURITY.md §5).
+    """
+    scratch = config.WORK_DIR / UPLOAD_SCRATCH / uuid.uuid4().hex[:12]
+    suffix = Path(upload.filename or "").suffix[:8]
+    destination = scratch / f"{stem}{suffix or '.bin'}"
+    try:
+        images.spool(upload.file, config.MAX_UPLOAD_BYTES, destination)
+        images.inspect_header(destination)
+    except images.ImageError as exc:
+        shutil.rmtree(scratch, ignore_errors=True)
+        # Over the byte cap is 413; anything else is a bad image.
+        status = 413 if "MB" in str(exc) else 400
+        raise HTTPException(status, str(exc)) from exc
+    return destination
+
+
+def _discard_scratch(*paths: Path | None) -> None:
+    """Remove spooled uploads once the decode is done."""
+    for path in paths:
+        if path is not None:
+            shutil.rmtree(path.parent, ignore_errors=True)
 
 
 def _job_dir(job_id: str):
@@ -162,13 +199,30 @@ def start_cutout(
     protect: Annotated[UploadFile | None, File()] = None,
     dpi: Annotated[int, Form(ge=30, le=1200)] = 300,
 ) -> dict[str, object]:
-    """Remove the background. Returns a job to poll."""
-    image = _open(_read_upload(file))
-    mask = _open(_read_upload(protect)) if protect is not None else None
+    """Remove the background. Returns a job to poll.
+
+    The upload is spooled to disk and validated from its header; the decode
+    happens inside the worker. A *queued* job therefore holds a path rather than
+    a decoded image, which is what stops a queue of large jobs stacking hundreds
+    of megabytes of pixels on a 12 GB machine (NEXT.md 2.1).
+    """
     name = file.filename or "image"
+    source = _spool_upload(file, "source")
+    mask_path = _spool_upload(protect, "protect") if protect is not None else None
 
     def work(report: jobs.Reporter) -> dict[str, object]:
-        result = images.cutout(image, report, protect_mask=mask)
+        # Raising `images.ImageError` here rather than HTTPException: this runs on
+        # the job thread, where the registry turns an exception into `job.error`
+        # and the operator sees the message. An HTTP error would be swallowed.
+        report.step("Reading the image…", 0.02)
+        try:
+            image = images.load_path(source)
+            mask = images.load_path(mask_path) if mask_path is not None else None
+            result = images.cutout(image, report, protect_mask=mask)
+        finally:
+            # The client's photograph does not stay on disk any longer than the
+            # decode needs it — cancelled and failed jobs included.
+            _discard_scratch(source, mask_path)
         report.step("Writing PNG…", 0.95)
         data, fmt, media = images.encode(result, "PNG", dpi=dpi)
         job_id = report._job.id  # noqa: SLF001 - the reporter owns this job
@@ -202,14 +256,21 @@ def start_upscale(
     `scale` is the operator's choice: `2x`, `4x`, or `print` to hit exactly the
     pixel size `/printsize/assess` says the job needs.
     """
-    image = _open(_read_upload(file))
     name = file.filename or "image"
     target = (target_w, target_h) if target_w and target_h else None
     if scale == "print" and target is None:
         raise HTTPException(400, "Choosing 'print' needs a target size to aim for.")
 
+    # Spooled, not held in memory — see `start_cutout`.
+    source = _spool_upload(file, "source")
+
     def work(report: jobs.Reporter) -> dict[str, object]:
-        result = images.upscale(image, scale, target, report)
+        report.step("Reading the image…", 0.02)
+        try:
+            image = images.load_path(source)
+            result = images.upscale(image, scale, target, report)
+        finally:
+            _discard_scratch(source)
         report.step("Writing file…", 0.96)
         data, out_fmt, media = images.encode(result.image, fmt, dpi=dpi, cmyk=cmyk)
         job_id = report._job.id  # noqa: SLF001

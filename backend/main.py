@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import shutil
 import threading
+import time
 import webbrowser
 from contextlib import asynccontextmanager
 from importlib import import_module
@@ -52,6 +53,30 @@ def sweep_expired_jobs() -> int:
             shutil.rmtree(directory, ignore_errors=True)
         job.files_deleted = True
         removed += 1
+    return removed + _sweep_upload_scratch()
+
+
+def _sweep_upload_scratch(ttl: float = jobs.RESULT_TTL_SECONDS) -> int:
+    """Remove spooled uploads whose job never got to delete them.
+
+    Uploads are spooled to disk so a queued job holds a path rather than a
+    decoded image (NEXT.md 2.1), and the worker removes each one as soon as it
+    has decoded it. This is the backstop for a process that died in between —
+    otherwise a power cut would leave a client's photograph on the shop PC,
+    which is the thing SECURITY.md §5 exists to prevent.
+    """
+    scratch = config.WORK_DIR / "uploads"
+    if not scratch.is_dir():
+        return 0
+    cutoff = time.time() - ttl
+    removed = 0
+    for entry in scratch.iterdir():
+        try:
+            if entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+                removed += 1
+        except OSError:
+            continue
     return removed
 
 
