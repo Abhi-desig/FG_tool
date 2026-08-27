@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw
@@ -75,9 +76,28 @@ def test_unknown_canvas_is_rejected() -> None:
 
 
 def test_text_near_the_edge_is_flagged() -> None:
+    """Left-aligned text starting at the trim is unsafe; centred text is not.
+
+    The check measures the glyphs, not the box (NEXT.md 3.8). A *box* pinned to
+    x=0 whose text is centred paints nowhere near the edge, so flagging it would
+    be a false alarm — and false alarms are what get real warnings ignored.
+    """
     canvas = posters.CANVASES["a4-portrait"]
-    assert posters.outside_safe_zone(canvas, block(x=0.001, y=0.5)) is True
+    assert posters.outside_safe_zone(canvas, block(x=0.001, y=0.5, align="left")) is True
     assert posters.outside_safe_zone(canvas, block(x=0.2, y=0.5, width=0.6)) is False
+
+
+def test_a_centred_box_at_the_edge_is_judged_on_its_text() -> None:
+    """The box touches the trim; the short centred line inside it does not."""
+    canvas = posters.CANVASES["a4-portrait"]
+    assert posters.outside_safe_zone(canvas, block(x=0.0, y=0.5, align="centre")) is False
+
+
+def test_text_running_below_the_bottom_trim_is_flagged() -> None:
+    """Wrapping adds lines, and those lines have to go somewhere."""
+    canvas = posters.CANVASES["a4-portrait"]
+    tall = block(id="t", text="കേരളം ഗ്രാൻഡ് സെയിൽ", y=0.95, size="large")
+    assert posters.outside_safe_zone(canvas, tall) is True
 
 
 def test_a_wide_box_overflowing_the_right_edge_is_flagged() -> None:
@@ -93,10 +113,20 @@ def test_flex_banners_need_a_bigger_margin() -> None:
 
 
 def test_safe_zone_report_covers_every_block() -> None:
-    layout = posters.Layout(blocks=[block(id="a"), block(id="b", x=0.0)])
+    layout = posters.Layout(
+        blocks=[block(id="a"), block(id="b", x=0.0, align="left")]
+    )
     report = posters.safe_zone_report(layout)
     assert {r["id"] for r in report} == {"a", "b"}
     assert [r["outside_safe_zone"] for r in report] == [False, True]
+
+
+def test_safe_zone_report_shows_where_the_text_actually_sits() -> None:
+    """The extent is reported, so a warning can be explained rather than asserted."""
+    layout = posters.Layout(blocks=[block(id="a")])
+    extent = posters.safe_zone_report(layout)[0]["extent"]
+    assert extent["x0"] < extent["x1"]
+    assert extent["y0"] < extent["y1"]
 
 
 # --- auto colour ----------------------------------------------------------
@@ -219,6 +249,24 @@ def parse(markup: str) -> ET.Element:
     return ET.fromstring(markup)
 
 
+def svg_texts(root: ET.Element) -> list[str]:
+    """The words in each `<text>`, whether or not auto-fit wrapped it.
+
+    A line too long for the canvas comes out as several `<tspan>`s (NEXT.md 0.2)
+    rather than one line running off both edges. The gate is about the text being
+    real and editable, not about it being on one line, so these are joined back
+    up before comparing.
+    """
+    out: list[str] = []
+    for element in root.iter(f"{SVG_NS}text"):
+        spans = element.findall(f"{SVG_NS}tspan")
+        if spans:
+            out.append(" ".join((s.text or "") for s in spans))
+        elif element.text:
+            out.append(element.text)
+    return out
+
+
 def test_svg_is_well_formed_xml() -> None:
     root = parse(posters.render_svg(sample_layout()))
     assert root.tag == f"{SVG_NS}svg"
@@ -227,7 +275,7 @@ def test_svg_is_well_formed_xml() -> None:
 def test_svg_carries_real_text_not_paths() -> None:
     """The whole exit gate: editable text objects, nothing rasterised or traced."""
     root = parse(posters.render_svg(sample_layout()))
-    texts = [t.text for t in root.iter(f"{SVG_NS}text")]
+    texts = svg_texts(root)
     assert "കേരളം ഗ്രാൻഡ് സെയിൽ" in texts
     assert "50% OFF" in texts
     assert "9847 000 000" in texts
@@ -238,7 +286,7 @@ def test_svg_malayalam_survives_verbatim() -> None:
     """Unicode mode must not mangle a single codepoint."""
     original = "കേരളം ഗ്രാൻഡ് സെയിൽ"
     root = parse(posters.render_svg(sample_layout()))
-    assert any(t.text == original for t in root.iter(f"{SVG_NS}text"))
+    assert original in svg_texts(root)
 
 
 def test_svg_dimensions_are_physical_for_print() -> None:
@@ -468,3 +516,157 @@ def test_a_word_still_wins_when_there_is_no_figure() -> None:
 def test_a_long_first_line_naming_a_festival_is_the_headline() -> None:
     """A kicker is two words. "Onam Mega Sale" is the big line, not a label."""
     assert _roles("Onam Mega Sale\nBig discounts inside")["headline"] == "Onam Mega Sale"
+
+
+# --- golden layout widths -------------------------------------------------
+#
+# NEXT.md 0.2: a Malayalam headline did not fit the canvas at any size that
+# reads as a headline, and the only defence was a warning rendered *below* the
+# export buttons. These lock the fix. The fixture is real browser measurement —
+# see tests/golden/poster_widths.tsv for how it was taken and why nothing else
+# can stand in for it.
+
+GOLDEN_WIDTHS = Path(__file__).parent / "golden" / "poster_widths.tsv"
+
+
+def _golden_widths() -> list[tuple[str, str, str, float, str]]:
+    rows: list[tuple[str, str, str, float, str]] = []
+    for line in GOLDEN_WIDTHS.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        parts = line.split("\t")
+        assert len(parts) >= 4, f"malformed golden row: {line!r}"
+        note = parts[4] if len(parts) > 4 else ""
+        rows.append((parts[0], parts[1], parts[2], float(parts[3]), note))
+    return rows
+
+
+WIDTH_ROWS = _golden_widths()
+
+
+def test_golden_width_fixture_is_present() -> None:
+    """The measurements are the only ground truth; losing them loses the test."""
+    assert len(WIDTH_ROWS) >= 5, f"only {len(WIDTH_ROWS)} measured rows"
+
+
+@pytest.mark.parametrize(
+    ("text", "size", "canvas_key", "rendered_px", "note"),
+    WIDTH_ROWS,
+    ids=[f"{r[0][:14]}-{r[1]}" for r in WIDTH_ROWS],
+)
+def test_measured_text_is_fitted_inside_the_safe_box(
+    text: str, size: str, canvas_key: str, rendered_px: float, note: str
+) -> None:
+    """Given the real measurement, auto-fit must bring the text inside the trim.
+
+    This is the assertion that 0.2 was missing: the shop's own name at the
+    default headline size rendered 231% of the canvas width, and the SVG carried
+    it off both edges with no wrapping and no auto-shrink.
+    """
+    canvas = posters.CANVASES[canvas_key]
+    blk = block(id="g1", text=text, size=size, width=0.84)
+    requested_px = posters.SIZE_SCALE[size] * canvas.height_px
+    measured_em = rendered_px / requested_px
+
+    fitted = posters.fit_block(blk, canvas, measured_em=measured_em)
+
+    inset_x, _ = canvas.safe_fraction
+    limit = min(blk.width, 1 - 2 * inset_x)
+    assert fitted.width <= limit + 1e-6, (
+        f"{note}: fitted to {fitted.width:.3f} of the canvas, box allows {limit:.3f}"
+    )
+    assert not fitted.overflows, f"{note}: auto-fit gave up on ordinary shop copy"
+    assert fitted.font_px > 0
+
+
+def test_the_shop_name_actually_gets_shrunk_or_wrapped() -> None:
+    """The headline row must be visibly adjusted, not quietly passed through."""
+    canvas = posters.CANVASES["a4-portrait"]
+    text, size, _, rendered_px, _ = WIDTH_ROWS[0]
+    blk = block(id="g1", text=text, size=size, width=0.84)
+    measured_em = rendered_px / (posters.SIZE_SCALE[size] * canvas.height_px)
+
+    fitted = posters.fit_block(blk, canvas, measured_em=measured_em)
+    assert fitted.shrunk or fitted.wrapped
+    # 231% of the page cannot be rescued by shrinking alone without dropping
+    # below the legible floor, so this one must wrap.
+    assert fitted.wrapped, "a headline at 231% of the page should wrap, not just shrink"
+
+
+@pytest.mark.parametrize(
+    ("text", "size", "canvas_key", "rendered_px", "note"),
+    WIDTH_ROWS,
+    ids=[f"{r[0][:14]}-{r[1]}" for r in WIDTH_ROWS],
+)
+def test_estimate_never_calls_overflowing_text_safe(
+    text: str, size: str, canvas_key: str, rendered_px: float, note: str
+) -> None:
+    """The backend's own estimate may over-warn. It may never under-warn.
+
+    The estimator has no shaping engine and is documented as approximate. The
+    direction of its error is what matters: over-warning costs a glance,
+    under-warning costs a reprint.
+    """
+    canvas = posters.CANVASES[canvas_key]
+    blk = block(id="g1", text=text, size=size, width=0.84)
+    estimated_px = posters.estimate_text_width(blk, canvas) * canvas.width_px
+
+    inset_x, _ = canvas.safe_fraction
+    safe_px = (1 - 2 * inset_x) * canvas.width_px
+    if rendered_px > safe_px:
+        assert estimated_px * posters._ESTIMATE_MARGIN > safe_px, (
+            f"{note}: really {rendered_px:.0f}px, estimated {estimated_px:.0f}px — "
+            f"would have been reported as fitting a {safe_px:.0f}px box"
+        )
+
+
+def test_svg_wraps_a_long_headline_into_tspans() -> None:
+    """An overlong line comes out as several lines, not one that runs off."""
+    text = WIDTH_ROWS[0][0]
+    layout = posters.Layout(
+        canvas="a4-portrait",
+        blocks=[block(id="h", text=text, size="huge", width=0.84)],
+    )
+    canvas = layout.resolved_canvas()
+    measured = {"h": WIDTH_ROWS[0][3] / (posters.SIZE_SCALE["huge"] * canvas.height_px)}
+
+    root = ET.fromstring(posters.render_svg(layout, measured=measured, embed_font=False))
+    texts = root.findall(f".//{SVG_NS}text")
+    assert texts, "no <text> element in the export"
+    spans = texts[-1].findall(f"{SVG_NS}tspan")
+    assert len(spans) > 1, "the headline was not wrapped in the exported SVG"
+    # Nothing may be lost in the process — that is the rule the whole module
+    # is built on.
+    joined = " ".join((s.text or "") for s in spans)
+    assert joined.split() == text.split()
+
+
+def test_export_embeds_the_unicode_font() -> None:
+    """NEXT.md 1.5: the SVG named a font it did not ship."""
+    layout = posters.Layout(blocks=[block(id="h", text="ഓണം ആശംസകൾ", mode="unicode")])
+    markup = posters.render_svg(layout)
+    assert "@font-face" in markup
+    assert "font/woff2;base64," in markup
+
+
+def test_ascii_only_export_skips_the_font_payload() -> None:
+    """ML-TTKarthika posters do not need 89 KB of a font they never consult."""
+    layout = posters.Layout(blocks=[block(id="h", text="ഓണം", mode="ascii")])
+    assert "@font-face" not in posters.render_svg(layout)
+
+
+def test_safe_zone_and_overflow_agree() -> None:
+    """NEXT.md 3.8: two checks that did not talk to each other.
+
+    A centred block in a narrow box, with text far too wide for it, used to
+    report `outside_safe_zone: false` while the overflow check reported a
+    violation. The safe-zone test now measures the glyphs, not the box.
+    """
+    canvas = posters.CANVASES["a4-portrait"]
+    # A narrow box in the middle of the page: the box is safe, the text is not.
+    blk = block(id="w", text="X" * 400, size="huge", x=0.45, width=0.1, align="centre")
+    fitted = posters.fit_block(blk, canvas)
+    assert fitted.overflows, "fixture is wrong — this text should not be fittable"
+    assert posters.outside_safe_zone(canvas, blk, fitted), (
+        "text running past the trim was reported as inside the safe zone"
+    )

@@ -8,6 +8,7 @@ containing text.
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
@@ -116,6 +117,10 @@ def split_copy(body: CopyIn) -> dict[str, object]:
 
 class CheckRequest(BaseModel):
     layout: LayoutIn
+    # Real text widths at 1 em, measured by the browser with the font loaded and
+    # keyed by block id. The backend has no shaping engine, so when these are
+    # supplied they replace its estimate entirely.
+    measured: dict[str, float] = Field(default_factory=dict, max_length=MAX_BLOCKS)
 
 
 @router.post("/posters/check")
@@ -123,6 +128,8 @@ def check(body: CheckRequest) -> dict[str, object]:
     """Safe-zone and overflow warnings, without rendering anything."""
     layout = _resolve(body.layout)
     canvas = layout.resolved_canvas()
+    measured = _clean_measured(body.measured)
+    fits = posters.fit_layout(layout, measured)
     return {
         "canvas": {
             "key": canvas.key,
@@ -130,8 +137,35 @@ def check(body: CheckRequest) -> dict[str, object]:
             "height_px": canvas.height_px,
             "safe_fraction": canvas.safe_fraction,
         },
-        "safe_zone": posters.safe_zone_report(layout),
-        "overflow": posters.overflow_warnings(layout),
+        "safe_zone": posters.safe_zone_report(layout, measured),
+        "overflow": posters.overflow_warnings(layout, measured),
+        # What auto-fit did. Not a warning — the operator does not have to act on
+        # it — but it must be visible, or the poster silently differs from what
+        # was typed.
+        "fitted": posters.fit_report(layout, measured),
+        "blocks": [
+            {
+                "id": f.id,
+                "font_px": round(f.font_px, 1),
+                "scale": round(f.scale, 3),
+                "lines": f.lines,
+                "overflows": f.overflows,
+            }
+            for f in fits.values()
+        ],
+    }
+
+
+def _clean_measured(measured: dict[str, float]) -> dict[str, float]:
+    """Drop anything that is not a usable measurement.
+
+    These arrive from the browser, so a stale or broken value must not be able
+    to make a block fit that does not.
+    """
+    return {
+        key: value
+        for key, value in measured.items()
+        if isinstance(value, int | float) and 0 < value < 10_000
     }
 
 
@@ -140,16 +174,28 @@ async def svg(
     layout: Annotated[str, Form()],
     background: Annotated[UploadFile | None, File()] = None,
     safe_zone: Annotated[bool, Form()] = False,
+    measured: Annotated[str | None, Form()] = None,
 ) -> Response:
     """The deliverable: vector, with real editable text.
 
     Multipart rather than JSON because the background image rides along, and the
     result is a self-contained file with the image embedded as a data URI.
+
+    `measured` carries the browser's real text widths so the exported file is
+    fitted exactly as the on-screen preview was — without it the export would
+    fall back to the estimate and could differ from what the operator approved.
     """
     try:
         parsed = LayoutIn.model_validate_json(layout)
     except ValueError as exc:
         raise HTTPException(400, f"Bad layout: {exc}") from exc
+
+    widths: dict[str, float] = {}
+    if measured:
+        try:
+            widths = _clean_measured(json.loads(measured))
+        except (ValueError, AttributeError) as exc:
+            raise HTTPException(400, f"Bad measurements: {exc}") from exc
 
     resolved = _resolve(parsed)
 
@@ -172,6 +218,7 @@ async def svg(
         background=data,
         background_media_type=media,
         show_safe_zone=safe_zone,
+        measured=widths,
     )
     return Response(
         content=markup,

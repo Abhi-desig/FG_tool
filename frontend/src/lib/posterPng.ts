@@ -12,13 +12,7 @@
  */
 
 import type { CanvasPreset, PosterBlock } from "@/lib/api"
-
-const SIZE_SCALE: Record<string, number> = {
-  small: 0.035,
-  medium: 0.055,
-  large: 0.085,
-  huge: 0.135,
-}
+import { LINE_HEIGHT, fitBlock } from "@/lib/textFit"
 
 /** Cap the raster so a 6 ft banner does not try to allocate 5184×3456×4 bytes. */
 const MAX_PIXELS = 40_000_000
@@ -67,7 +61,12 @@ export async function renderPosterPng(opts: RenderOptions): Promise<Blob> {
   await document.fonts.ready
 
   for (const block of blocks) {
-    const fontPx = (SIZE_SCALE[block.size] ?? 0.055) * height
+    // Auto-fit, from the same helper the preview and the SVG export use, so the
+    // proof is a proof of the file that will actually be handed over. Measured
+    // at print scale, then converted to the raster's scale.
+    const fit = fitBlock(block, preset)
+    const fontPx = fit.fontPx * scale
+
     // Always the Unicode text in a Unicode font, whatever the block's export
     // mode. A block set to `ascii` still holds Unicode here — pairing that with
     // ML-TTKarthika, which has no Unicode Malayalam glyphs, would render tofu.
@@ -79,16 +78,19 @@ export async function renderPosterPng(opts: RenderOptions): Promise<Blob> {
 
     const offset = block.align === "left" ? 0 : block.align === "right" ? 1 : 0.5
     const x = (block.x + block.width * offset) * width
-    const y = block.y * height + fontPx * 0.8
+    const top = block.y * height + fontPx * 0.8
 
-    if (block.shadow) {
-      ctx.lineJoin = "round"
-      ctx.strokeStyle = "rgba(0,0,0,0.45)"
-      ctx.lineWidth = Math.max(1, fontPx * 0.14)
-      ctx.strokeText(block.text, x, y)
-    }
-    ctx.fillStyle = block.colour
-    ctx.fillText(block.text, x, y)
+    fit.lines.forEach((line, i) => {
+      const y = top + i * fontPx * LINE_HEIGHT
+      if (block.shadow) {
+        ctx.lineJoin = "round"
+        ctx.strokeStyle = "rgba(0,0,0,0.45)"
+        ctx.lineWidth = Math.max(1, fontPx * 0.14)
+        ctx.strokeText(line, x, y)
+      }
+      ctx.fillStyle = block.colour
+      ctx.fillText(line, x, y)
+    })
   }
 
   if (safeZone) {

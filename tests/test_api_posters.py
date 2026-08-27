@@ -65,9 +65,66 @@ def test_check_reports_safe_zone_and_overflow() -> None:
 
 
 def test_check_flags_text_over_the_trim_edge() -> None:
-    layout = {"canvas": "a4-portrait", "blocks": [{"id": "e", "text": "EDGE", "x": 0.0, "y": 0.5}]}
+    """Left-aligned, so the glyphs really do start at the trim.
+
+    The check measures the drawn text rather than the box that holds it
+    (NEXT.md 3.8) — a centred line inside an edge-to-edge box is safe, and
+    `test_check_does_not_flag_a_centred_line_in_a_wide_box` pins that.
+    """
+    layout = {
+        "canvas": "a4-portrait",
+        "blocks": [{"id": "e", "text": "EDGE", "x": 0.0, "y": 0.5, "align": "left"}],
+    }
     body = client.post("/api/posters/check", json={"layout": layout}).json()
     assert body["safe_zone"][0]["outside_safe_zone"] is True
+
+
+def test_check_does_not_flag_a_centred_line_in_a_wide_box() -> None:
+    layout = {
+        "canvas": "a4-portrait",
+        "blocks": [{"id": "e", "text": "EDGE", "x": 0.0, "y": 0.5, "align": "centre"}],
+    }
+    body = client.post("/api/posters/check", json={"layout": layout}).json()
+    assert body["safe_zone"][0]["outside_safe_zone"] is False
+
+
+def test_check_reports_what_auto_fit_changed() -> None:
+    """A shrunk or wrapped block must be declared, not silently different."""
+    layout = {
+        "canvas": "a4-portrait",
+        "blocks": [{"id": "h", "text": "ഫോക്കസ് ഡിജിറ്റൽസ്", "size": "huge", "y": 0.1}],
+    }
+    body = client.post("/api/posters/check", json={"layout": layout}).json()
+    assert body["fitted"], "the headline was adjusted and nothing said so"
+    assert body["blocks"][0]["lines"]
+
+
+def test_check_prefers_a_browser_measurement_over_its_own_estimate() -> None:
+    """The server has no shaping engine; a real measurement must win."""
+    layout = {
+        "canvas": "a4-portrait",
+        "blocks": [{"id": "h", "text": "ഓണം ആശംസകൾ", "size": "medium", "y": 0.1}],
+    }
+    # 1897 px at the medium size on A4 — the measured value from NEXT.md 0.2.
+    measured = {"h": 1897 / (0.055 * 3508)}
+    body = client.post(
+        "/api/posters/check", json={"layout": layout, "measured": measured}
+    ).json()
+    assert body["overflow"] == []
+    assert body["blocks"][0]["scale"] == 1.0
+
+
+def test_check_ignores_an_impossible_measurement() -> None:
+    """A stale or broken number must not be able to make a block 'fit'."""
+    layout = {
+        "canvas": "a4-portrait",
+        "blocks": [{"id": "h", "text": "ഫോക്കസ് ഡിജിറ്റൽസ്", "size": "huge", "y": 0.1}],
+    }
+    body = client.post(
+        "/api/posters/check", json={"layout": layout, "measured": {"h": -5}}
+    ).json()
+    # Falls back to the estimate, which wraps it — not to "1 em wide, fits".
+    assert body["blocks"][0]["lines"] != ["ഫോക്കസ് ഡിജിറ്റൽസ്"]
 
 
 def test_check_rejects_an_unknown_canvas() -> None:
@@ -90,7 +147,14 @@ def test_svg_download_has_editable_text() -> None:
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("image/svg+xml")
     root = ET.fromstring(r.content)
-    texts = [t.text for t in root.iter(f"{SVG_NS}text")]
+    # Auto-fit may have wrapped the headline into <tspan>s (NEXT.md 0.2), so the
+    # words are collected across them. The gate is editable text, not one line.
+    texts: list[str] = []
+    for element in root.iter(f"{SVG_NS}text"):
+        spans = element.findall(f"{SVG_NS}tspan")
+        texts.append(
+            " ".join((s.text or "") for s in spans) if spans else (element.text or "")
+        )
     assert "കേരളം ഗ്രാൻഡ് സെയിൽ" in texts
     assert not list(root.iter(f"{SVG_NS}path"))
 

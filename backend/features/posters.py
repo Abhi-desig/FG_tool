@@ -31,12 +31,15 @@ from __future__ import annotations
 import base64
 import html
 import re
+import unicodedata
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Literal
 
 import numpy as np
 from PIL import Image
 
+from backend import config
 from backend.features import fonts
 
 MM_PER_INCH = 25.4
@@ -101,6 +104,17 @@ SIZE_SCALE: dict[str, float] = {
 
 DEFAULT_FONT_UNICODE = "Noto Sans Malayalam"
 DEFAULT_FONT_ASCII = fonts.DEFAULT_FONT  # ML-TTKarthika
+
+# The woff2 the UI already ships. Embedded into the exported SVG so the
+# deliverable does not depend on the font being installed — see `_font_face`.
+UNICODE_FONT_FILE = config.ROOT / "frontend" / "public" / "fonts" / "NotoSansMalayalam.woff2"
+
+# How small auto-fit may shrink a block before it stops reading as the size the
+# operator asked for. Below this the text wraps instead.
+MIN_FIT_SCALE = 0.6
+
+# Line spacing as a multiple of font size, for wrapped blocks.
+LINE_HEIGHT = 1.25
 
 
 @dataclass
@@ -295,23 +309,67 @@ def place_in_calm_space(
 # --- safe zone ------------------------------------------------------------
 
 
-def outside_safe_zone(canvas: Canvas, block: TextBlock) -> bool:
-    """True if trimming could cut this text off."""
+def text_extent(canvas: Canvas, block: TextBlock, fitted: Fitted | None = None) -> tuple[
+    float, float, float, float
+]:
+    """Where the drawn text actually sits, as canvas fractions: x0, y0, x1, y1.
+
+    The *box* is not the text. A centred block anchored at the middle of a narrow
+    box still paints outward from that anchor, so a long line escapes a box that
+    is itself comfortably inside the trim. Measuring the glyphs rather than the
+    box is what makes this agree with `overflow_warnings`.
+    """
+    if fitted is None:
+        fitted = fit_block(block, canvas)
+    _, offset = _anchor(block.align)
+    anchor_x = block.x + block.width * offset
+    x0 = anchor_x - fitted.width * offset
+    x1 = x0 + fitted.width
+    return x0, block.y, x1, block.y + fitted.height
+
+
+def outside_safe_zone(
+    canvas: Canvas, block: TextBlock, fitted: Fitted | None = None
+) -> bool:
+    """True if trimming could cut this text off.
+
+    Tests the rendered glyphs, not the box that nominally contains them — see
+    `text_extent`. Previously a block whose text overflowed its box reported
+    `false` here while `overflow_warnings` reported a violation: two checks that
+    did not talk to each other.
+    """
     inset_x, inset_y = canvas.safe_fraction
+    x0, y0, x1, y1 = text_extent(canvas, block, fitted)
     return (
-        block.x < inset_x
-        or block.y < inset_y
-        or block.x + block.width > 1 - inset_x
-        or block.y > 1 - inset_y
+        x0 < inset_x
+        or y0 < inset_y
+        or x1 > 1 - inset_x
+        or y1 > 1 - inset_y
     )
 
 
-def safe_zone_report(layout: Layout) -> list[dict[str, object]]:
+def safe_zone_report(
+    layout: Layout, measured: dict[str, float] | None = None
+) -> list[dict[str, object]]:
     canvas = layout.resolved_canvas()
-    return [
-        {"id": b.id, "outside_safe_zone": outside_safe_zone(canvas, b)}
-        for b in layout.blocks
-    ]
+    fits = fit_layout(layout, measured)
+    rows: list[dict[str, object]] = []
+    for block in layout.blocks:
+        fitted = fits[block.id]
+        x0, y0, x1, y1 = text_extent(canvas, block, fitted)
+        rows.append(
+            {
+                "id": block.id,
+                "outside_safe_zone": outside_safe_zone(canvas, block, fitted),
+                "extent": {
+                    "x0": round(x0, 4),
+                    "y0": round(y0, 4),
+                    "x1": round(x1, 4),
+                    "y1": round(y1, 4),
+                },
+            }
+        )
+    return rows
 
 
 # --- SVG ------------------------------------------------------------------
@@ -344,19 +402,55 @@ def _anchor(align: Align) -> tuple[str, float]:
     }[align]
 
 
+@lru_cache(maxsize=1)
+def _font_face() -> str:
+    """An `@font-face` carrying the Unicode font, so the SVG stands alone.
+
+    Without this the export names ``Noto Sans Malayalam`` and ships none of it:
+    correct on a machine that happens to have the font installed, tofu or wrong
+    metrics everywhere else. The whole woff2 is embedded rather than a subset —
+    subsetting would need a font toolkit this project does not install, and 89 KB
+    against an embedded background photo is not worth a dependency.
+
+    Note for CorelDRAW: it honours the *text*, not the `@font-face`. The embedded
+    font makes the file correct in browsers and modern viewers; on the shop PC the
+    ``ascii`` export mode remains the route that needs no font resolution at all.
+    """
+    try:
+        payload = UNICODE_FONT_FILE.read_bytes()
+    except OSError:
+        # Shipping an SVG with a broken font reference is still better than
+        # failing the export the operator is waiting on.
+        return ""
+    encoded = base64.b64encode(payload).decode("ascii")
+    return (
+        "<defs><style type=\"text/css\">@font-face{"
+        f"font-family:'{DEFAULT_FONT_UNICODE}';font-style:normal;font-weight:400 700;"
+        f"src:url(data:font/woff2;base64,{encoded}) format('woff2');"
+        "}</style></defs>"
+    )
+
+
 def render_svg(
     layout: Layout,
     background: bytes | None = None,
     background_media_type: str = "image/png",
     show_safe_zone: bool = False,
+    measured: dict[str, float] | None = None,
+    embed_font: bool = True,
 ) -> str:
     """Build an SVG with real, editable text.
 
     `background` is embedded as a data URI so the file is self-contained — one
-    file to hand over, nothing to lose track of.
+    file to hand over, nothing to lose track of. The Unicode font is embedded for
+    the same reason; see `_font_face`.
+
+    Text is auto-fitted before it is drawn, so a headline too long for the canvas
+    comes back shrunk or wrapped rather than running off both edges.
     """
     canvas = layout.resolved_canvas()
     width, height = canvas.width_px, canvas.height_px
+    fits = fit_layout(layout, measured)
 
     parts: list[str] = [
         f'<svg xmlns="http://www.w3.org/2000/svg" '
@@ -364,8 +458,16 @@ def render_svg(
         f'width="{canvas.width_mm}mm" height="{canvas.height_mm}mm" '
         f'viewBox="0 0 {width} {height}">',
         f"<title>{html.escape(canvas.label)} poster</title>",
-        f'<rect width="{width}" height="{height}" fill="{layout.background_colour}"/>',
     ]
+
+    # Only when a block actually uses it — an ASCII-only poster is for CorelDRAW
+    # and does not need 89 KB of Unicode font it will never consult.
+    if embed_font and any(b.mode != "ascii" for b in layout.blocks):
+        parts.append(_font_face())
+
+    parts.append(
+        f'<rect width="{width}" height="{height}" fill="{layout.background_colour}"/>'
+    )
 
     if background:
         encoded = base64.b64encode(background).decode("ascii")
@@ -387,12 +489,12 @@ def render_svg(
 
     for block in layout.blocks:
         block.clamp()
-        font_px = SIZE_SCALE.get(block.size, 0.055) * height
+        fitted = fits[block.id]
+        font_px = fitted.font_px
         anchor, offset = _anchor(block.align)
         x = (block.x + block.width * offset) * width
         # SVG y is the baseline, so drop by roughly a cap height.
         y = block.y * height + font_px * 0.8
-        text = html.escape(_text_for(block))
         weight = "700" if block.weight == "bold" else "400"
         common = (
             f'x="{x:.1f}" y="{y:.1f}" '
@@ -400,6 +502,19 @@ def render_svg(
             f'font-size="{font_px:.1f}" font-weight="{weight}" '
             f'text-anchor="{anchor}"'
         )
+
+        # One <tspan> per wrapped line. A single-line block emits its text
+        # directly, so the common case stays the plain <text> CorelDRAW likes.
+        if len(fitted.lines) == 1:
+            body = html.escape(_line_text(block, fitted.lines[0]))
+        else:
+            body = "".join(
+                f'<tspan x="{x:.1f}" '
+                f'dy="{0 if i == 0 else font_px * LINE_HEIGHT:.1f}">'
+                f"{html.escape(_line_text(block, line))}</tspan>"
+                for i, line in enumerate(fitted.lines)
+            )
+
         if block.shadow:
             # A soft dark pass under light text. Kept as a second <text> rather
             # than a filter so it stays editable and prints predictably.
@@ -407,9 +522,9 @@ def render_svg(
                 f'<text {common} fill="#000000" fill-opacity="0.45" '
                 f'stroke="#000000" stroke-opacity="0.45" '
                 f'stroke-width="{max(1.0, font_px * 0.07):.1f}" '
-                f'stroke-linejoin="round">{text}</text>'
+                f'stroke-linejoin="round">{body}</text>'
             )
-        parts.append(f'<text {common} fill="{block.colour}">{text}</text>')
+        parts.append(f'<text {common} fill="{block.colour}">{body}</text>')
 
     parts.append("</svg>")
     return "\n".join(parts)
@@ -587,36 +702,267 @@ def describe_presets() -> list[dict[str, object]]:
     ]
 
 
-def estimate_text_width(block: TextBlock, canvas: Canvas) -> float:
+# --- fitting --------------------------------------------------------------
+#
+# A Malayalam shop name overflows the page at every size that reads as a
+# headline. Measured in the browser on 2026-08-26 with the real woff2 loaded,
+# A4 portrait: ``ഫോക്കസ് ഡിജിറ്റൽസ്`` at "huge" renders 5730 px wide on a
+# 2480 px canvas — 231%. So the text is *fitted* before it is drawn, and a
+# warning is the last resort rather than the only defence.
+
+# Average advance per character, in ems, by Unicode general category. This is an
+# estimate and is documented as one: the backend has no shaping engine (see the
+# module docstring), so it cannot know a conjunct's real width. Weights are
+# anchored to the five browser measurements in `tests/golden/poster_widths.tsv`,
+# where this lands within about ±20%.
+#
+# The browser is authoritative. `PosterDesigner` measures each block with the
+# real font and sends the fitted size back, so these numbers decide only the
+# server-side warning and the fallback used when no measurement was supplied.
+_ADVANCE_EM: dict[str, float] = {
+    "Lo": 1.00,  # Malayalam base letters — wide, and wider than Latin
+    "Lu": 0.62,
+    "Ll": 0.52,
+    "Mc": 0.55,  # spacing marks: ി ോ ം all take advance
+    "Mn": 0.00,  # nonspacing: the virama ് sits on the consonant
+    "Nd": 0.60,
+    "Zs": 0.30,
+    "Po": 0.30,
+    "Pd": 0.35,
+}
+_DEFAULT_ADVANCE_EM = 0.55
+
+# The estimator's known error band. Applied so a block that will overflow is
+# never reported as fitting — over-warning is recoverable, a poster printed with
+# the shop's name running off both edges is not.
+_ESTIMATE_MARGIN = 1.15
+
+
+def _advance_em(text: str) -> float:
+    """Estimated width of `text` in ems."""
+    return sum(
+        _ADVANCE_EM.get(unicodedata.category(character), _DEFAULT_ADVANCE_EM)
+        for character in text
+    )
+
+
+def estimate_text_width(block: TextBlock, canvas: Canvas, font_px: float | None = None) -> float:
     """Rough fraction of canvas width this text will occupy.
 
     Deliberately approximate — the browser measures properly. This exists so the
     backend can warn about an obvious overflow without a shaping engine it does
     not have.
     """
-    font_px = SIZE_SCALE.get(block.size, 0.055) * canvas.height_px
-    # ~0.55em average advance across Latin and Malayalam at this size.
-    return len(_text_for(block)) * font_px * 0.55 / canvas.width_px
+    if font_px is None:
+        font_px = SIZE_SCALE.get(block.size, 0.055) * canvas.height_px
+    return _advance_em(_text_for(block)) * font_px / canvas.width_px
 
 
-def overflow_warnings(layout: Layout) -> list[dict[str, object]]:
+@dataclass(frozen=True)
+class Fitted:
+    """One block, sized and broken so it actually fits the page."""
+
+    id: str
+    # The size actually used, in pixels, and as a fraction of the requested size.
+    font_px: float
+    scale: float
+    lines: list[str]
+    shrunk: bool
+    wrapped: bool
+    # True when even the smallest allowed size, wrapped, still runs off the box.
+    overflows: bool
+    # Fraction of canvas width the widest line occupies.
+    width: float
+    # Fraction of canvas height the whole block occupies.
+    height: float
+
+
+def _wrap_to(text: str, limit_em: float) -> list[str]:
+    """Break on spaces so no line exceeds `limit_em`.
+
+    A single word wider than the limit is kept whole rather than split — a
+    Malayalam word broken mid-conjunct is worse than one that overflows, and the
+    caller reports the overflow either way.
+    """
+    words = text.split()
+    if not words:
+        return [text]
+
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if current and _advance_em(candidate) > limit_em:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines or [text]
+
+
+def fit_block(
+    block: TextBlock,
+    canvas: Canvas,
+    measured_em: float | None = None,
+) -> Fitted:
+    """Shrink, then wrap, so the text stays inside its box.
+
+    Order matters and was chosen deliberately: shrinking preserves the single
+    strong line a headline wants, so it is tried first. Only when the text would
+    have to drop below `MIN_FIT_SCALE` — small enough that it no longer reads as
+    the size the operator picked — does it wrap instead.
+
+    `measured_em` is the browser's real measurement of the text at 1 em. When
+    supplied it replaces the estimate entirely, which is why the designer's
+    on-screen fit and the exported SVG agree.
+    """
+    requested_px = SIZE_SCALE.get(block.size, 0.055) * canvas.height_px
+    text = _text_for(block)
+    total_em = measured_em if measured_em is not None else _advance_em(text)
+
+    # The box, and the safe zone, whichever bites first. A block may not be
+    # rescued by growing past the trim.
+    inset_x, _ = canvas.safe_fraction
+    limit_fraction = min(block.width, 1 - 2 * inset_x)
+    limit_px = max(limit_fraction * canvas.width_px, 1.0)
+
+    if total_em <= 0:
+        return Fitted(
+            id=block.id, font_px=requested_px, scale=1.0, lines=[block.text],
+            shrunk=False, wrapped=False, overflows=False, width=0.0,
+            height=requested_px * LINE_HEIGHT / canvas.height_px,
+        )
+
+    # 1. Fits as it is.
+    if total_em * requested_px <= limit_px:
+        return Fitted(
+            id=block.id, font_px=requested_px, scale=1.0, lines=[block.text],
+            shrunk=False, wrapped=False, overflows=False,
+            width=total_em * requested_px / canvas.width_px,
+            height=requested_px * LINE_HEIGHT / canvas.height_px,
+        )
+
+    # 2. Shrink on one line, if that keeps it legible.
+    scale = limit_px / (total_em * requested_px)
+    if scale >= MIN_FIT_SCALE:
+        font_px = requested_px * scale
+        return Fitted(
+            id=block.id, font_px=font_px, scale=scale, lines=[block.text],
+            shrunk=True, wrapped=False, overflows=False,
+            width=total_em * font_px / canvas.width_px,
+            height=font_px * LINE_HEIGHT / canvas.height_px,
+        )
+
+    # 3. Wrap. Take the largest size at or above the floor whose lines all fit,
+    #    so a two-line headline stays as large as it can rather than jumping
+    #    straight to the minimum.
+    for step in range(0, 41):
+        trial = 1.0 - step * (1.0 - MIN_FIT_SCALE) / 40
+        font_px = requested_px * trial
+        lines = _wrap_to(block.text, limit_px / font_px)
+        widest = max(_advance_em(_line_text(block, line)) for line in lines)
+        if widest * font_px <= limit_px:
+            return Fitted(
+                id=block.id, font_px=font_px, scale=trial, lines=lines,
+                shrunk=trial < 1.0, wrapped=len(lines) > 1, overflows=False,
+                width=widest * font_px / canvas.width_px,
+                height=len(lines) * font_px * LINE_HEIGHT / canvas.height_px,
+            )
+
+    # 4. A single word wider than the box at the smallest allowed size.
+    font_px = requested_px * MIN_FIT_SCALE
+    lines = _wrap_to(block.text, limit_px / font_px)
+    widest = max(_advance_em(_line_text(block, line)) for line in lines)
+    return Fitted(
+        id=block.id, font_px=font_px, scale=MIN_FIT_SCALE, lines=lines,
+        shrunk=True, wrapped=len(lines) > 1, overflows=True,
+        width=widest * font_px / canvas.width_px,
+        height=len(lines) * font_px * LINE_HEIGHT / canvas.height_px,
+    )
+
+
+def _line_text(block: TextBlock, line: str) -> str:
+    """One wrapped line, in the characters that will actually be drawn."""
+    if block.mode != "ascii":
+        return line
+    return fonts.unicode_to_ascii(line)
+
+
+def fit_layout(
+    layout: Layout, measured: dict[str, float] | None = None
+) -> dict[str, Fitted]:
+    """Fit every block. Keyed by block id."""
     canvas = layout.resolved_canvas()
+    measured = measured or {}
+    return {
+        block.id: fit_block(block.clamp(), canvas, measured.get(block.id))
+        for block in layout.blocks
+    }
+
+
+def overflow_warnings(
+    layout: Layout, measured: dict[str, float] | None = None
+) -> list[dict[str, object]]:
+    """Blocks that auto-fit could not rescue.
+
+    Only genuine failures reach here. A block that was shrunk or wrapped to fit
+    is reported by `fit_report` as an adjustment, not as a warning — the
+    operator does not need to act on it.
+    """
+    fits = fit_layout(layout, measured)
     notes: list[dict[str, object]] = []
     for block in layout.blocks:
-        estimated = estimate_text_width(block, canvas)
-        if estimated > block.width * 1.25:
-            notes.append(
-                {
-                    "id": block.id,
-                    "message": (
-                        f"“{block.text[:28]}” is likely wider than its box — "
-                        f"make the box wider or the text smaller."
-                    ),
-                    "estimated_width": round(estimated, 3),
-                    "box_width": block.width,
-                }
-            )
+        fitted = fits[block.id]
+        # Trust a real browser measurement exactly; pad an estimate by its known
+        # error so a block that will overflow is never called safe.
+        certain = measured is not None and block.id in measured
+        effective = fitted.width if certain else fitted.width * _ESTIMATE_MARGIN
+        if not fitted.overflows and effective <= block.width:
+            continue
+        notes.append(
+            {
+                "id": block.id,
+                "message": (
+                    f"“{block.text[:28]}” is too long for this size — it still "
+                    f"runs past the edge at the smallest size that stays "
+                    f"readable. Shorten it, or use a wider canvas."
+                ),
+                "estimated_width": round(effective, 3),
+                "box_width": block.width,
+                "measured": certain,
+            }
+        )
     return notes
+
+
+def fit_report(
+    layout: Layout, measured: dict[str, float] | None = None
+) -> list[dict[str, object]]:
+    """What auto-fit did to each block, so the operator is never surprised."""
+    fits = fit_layout(layout, measured)
+    report: list[dict[str, object]] = []
+    for block in layout.blocks:
+        fitted = fits[block.id]
+        if not (fitted.shrunk or fitted.wrapped):
+            continue
+        if fitted.wrapped and fitted.shrunk:
+            what = f"shrunk to {fitted.scale:.0%} and wrapped onto {len(fitted.lines)} lines"
+        elif fitted.wrapped:
+            what = f"wrapped onto {len(fitted.lines)} lines"
+        else:
+            what = f"shrunk to {fitted.scale:.0%} of the {block.size} size"
+        report.append(
+            {
+                "id": block.id,
+                "message": f"“{block.text[:28]}” was {what} to fit the page.",
+                "scale": round(fitted.scale, 3),
+                "lines": len(fitted.lines),
+                "font_px": round(fitted.font_px, 1),
+            }
+        )
+    return report
 
 
 __all__ = [
@@ -626,11 +972,16 @@ __all__ = [
     "SIZE_SCALE",
     "CalmRegion",
     "Canvas",
+    "Fitted",
     "Layout",
     "PosterError",
     "TextBlock",
     "describe_presets",
+    "estimate_text_width",
     "find_calm_regions",
+    "fit_block",
+    "fit_layout",
+    "fit_report",
     "outside_safe_zone",
     "overflow_warnings",
     "place_in_calm_space",
@@ -638,4 +989,5 @@ __all__ = [
     "safe_zone_report",
     "split_copy",
     "suggest_colour",
+    "text_extent",
 ]

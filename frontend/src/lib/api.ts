@@ -459,8 +459,15 @@ export interface PosterLayout {
 
 export interface PosterCheck {
   canvas: { key: string; width_px: number; height_px: number; safe_fraction: [number, number] }
-  safe_zone: { id: string; outside_safe_zone: boolean }[]
-  overflow: { id: string; message: string }[]
+  safe_zone: {
+    id: string
+    outside_safe_zone: boolean
+    extent: { x0: number; y0: number; x1: number; y1: number }
+  }[]
+  overflow: { id: string; message: string; measured: boolean }[]
+  /** What auto-fit changed. Not a warning — but the operator must be told. */
+  fitted: { id: string; message: string; scale: number; lines: number }[]
+  blocks: { id: string; font_px: number; scale: number; lines: string[]; overflows: boolean }[]
 }
 
 export function posterPresets(): Promise<{
@@ -488,10 +495,18 @@ export function splitCopy(text: string): Promise<{ lines: CopyLine[] }> {
   })
 }
 
-export function checkPoster(layout: PosterLayout): Promise<PosterCheck> {
+/**
+ * `measured` carries each block's real width at 1 em, measured in the browser
+ * with the poster font loaded. The server has no shaping engine, so without
+ * these it can only estimate — see `lib/textFit`.
+ */
+export function checkPoster(
+  layout: PosterLayout,
+  measured: Record<string, number> = {},
+): Promise<PosterCheck> {
   return request<PosterCheck>("/api/posters/check", {
     method: "POST",
-    body: JSON.stringify({ layout }),
+    body: JSON.stringify({ layout, measured }),
   })
 }
 
@@ -512,10 +527,14 @@ export async function posterSvg(
   layout: PosterLayout,
   bg: File | null,
   safeZone: boolean,
+  measured: Record<string, number> = {},
 ): Promise<Blob> {
   const form = new FormData()
   form.append("layout", JSON.stringify(layout))
   form.append("safe_zone", String(safeZone))
+  // Without this the export re-fits from the server's estimate and could break
+  // the text differently from the preview the operator just approved.
+  form.append("measured", JSON.stringify(measured))
   if (bg) form.append("background", bg)
   const response = await fetch("/api/posters/svg", { method: "POST", body: form })
   if (!response.ok) throw new ApiError(`Export failed (${response.status})`, response.status)

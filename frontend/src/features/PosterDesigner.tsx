@@ -32,17 +32,9 @@ import {
   posterSvg,
 } from "@/lib/api"
 import { rasterIsReduced, renderPosterPng } from "@/lib/posterPng"
+import { LINE_HEIGHT, SIZE_SCALE, fitBlocks, measureBlocks } from "@/lib/textFit"
 
 const SIZES: BlockSize[] = ["small", "medium", "large", "huge"]
-
-// Must match SIZE_SCALE in backend/features/posters.py — text is sized as a
-// fraction of canvas height so a layout looks the same on A4 and on a banner.
-const SIZE_FRACTION: Record<string, number> = {
-  small: 0.035,
-  medium: 0.055,
-  large: 0.085,
-  huge: 0.135,
-}
 
 // Where each line starts out. A poster that opens looking like a poster is
 // easier to correct than one that opens as four lines stacked in the middle.
@@ -168,6 +160,16 @@ export function PosterDesigner() {
     }
   }, [bgUrl])
 
+  /**
+   * Auto-fit, measured with the real font.
+   *
+   * Computed here rather than read back from the server so the preview resizes
+   * as the operator types instead of 250 ms later. The same measurements are
+   * posted to `/posters/check` and `/posters/svg`, which run the identical
+   * shrink-then-wrap rule — so what is on screen is what exports.
+   */
+  const fits = useMemo(() => fitBlocks(blocks, preset), [blocks, preset])
+
   // Safe-zone and overflow warnings, debounced while dragging.
   useEffect(() => {
     if (blocks.length === 0) {
@@ -175,16 +177,27 @@ export function PosterDesigner() {
       return
     }
     const timer = setTimeout(() => {
-      checkPoster(layout)
+      checkPoster(layout, measureBlocks(blocks))
         .then(setCheck)
         .catch(() => setCheck(null))
     }, 250)
     return () => clearTimeout(timer)
-  }, [layout, blocks.length])
+  }, [layout, blocks])
 
   const unsafe = useMemo(
     () => new Set((check?.safe_zone ?? []).filter((s) => s.outside_safe_zone).map((s) => s.id)),
     [check],
+  )
+
+  /**
+   * Blocks auto-fit could not rescue. Export is blocked while any exist: a
+   * poster with the shop's name running off both edges is the expensive,
+   * visible error this tool is for, and it is worth a hard stop rather than a
+   * message the operator can scroll past.
+   */
+  const overflowing = useMemo(
+    () => new Set(Object.entries(fits).filter(([, f]) => f.overflows).map(([id]) => id)),
+    [fits],
   )
 
   const update = useCallback((id: string, patch: Partial<PosterBlock>) => {
@@ -359,9 +372,14 @@ export function PosterDesigner() {
   const exportSvg = async () => {
     setBusy(true)
     try {
-      download(await posterSvg(layout, bgFile, false), "svg")
+      // The same measurements the preview was fitted from, so the file breaks
+      // the text exactly where the operator saw it break.
+      download(await posterSvg(layout, bgFile, false, measureBlocks(blocks)), "svg")
+      const unicode = blocks.some((b) => b.mode === "unicode")
       toast.success("SVG saved", {
-        description: "Open in CorelDRAW — every line is still editable text.",
+        description: unicode
+          ? "Every line is still editable text. The Malayalam font travels inside the file — but CorelDRAW resolves fonts by name, so install Noto Sans Malayalam there, or switch those lines to the print-font mode."
+          : "Open in CorelDRAW — every line is still editable text in ML-TTKarthika.",
       })
     } catch {
       toast.error("Could not export the SVG")
@@ -465,39 +483,104 @@ export function PosterDesigner() {
               </p>
             )}
 
-            {blocks.map((block) => (
-              <div
-                key={block.id}
-                role="button"
-                tabIndex={0}
-                aria-label={`${ROLE_LABEL[block.role]}: ${block.text}`}
-                onPointerDown={(e) => onPointerDown(e, block)}
-                onKeyDown={(e) => onKeyDown(e, block)}
-                onFocus={() => setSelected(block.id)}
-                className={`absolute cursor-move select-none rounded px-1 outline-offset-2 ${
-                  selected === block.id ? "ring-2 ring-primary" : ""
-                } ${unsafe.has(block.id) ? "ring-2 ring-destructive" : ""}`}
-                style={{
-                  left: `${block.x * 100}%`,
-                  top: `${block.y * 100}%`,
-                  width: `${block.width * 100}%`,
-                  color: block.colour,
-                  fontSize: `${(SIZE_FRACTION[block.size] ?? 0.055) * 100}cqh`,
-                  fontWeight: block.weight === "bold" ? 700 : 400,
-                  textAlign: block.align === "centre" ? "center" : block.align,
-                  textShadow: block.shadow ? "0 0 0.18em rgba(0,0,0,0.55)" : undefined,
-                  lineHeight: 1.25,
-                  // SVG <text> is a single line and never wraps. If the preview
-                  // wrapped, what you see would not be what you export — so it
-                  // must overflow here exactly as it will overflow there. The
-                  // overflow warning below is how the operator finds out.
-                  whiteSpace: "nowrap",
-                }}
-              >
-                <span className="malayalam">{block.text}</span>
-              </div>
-            ))}
+            {blocks.map((block) => {
+              const fit = fits[block.id]
+              // The fitted size as a fraction of canvas height, so the preview
+              // and the export scale identically. Falls back to the requested
+              // size until the preset has loaded and a fit exists.
+              const heightFraction =
+                fit && preset
+                  ? fit.fontPx / preset.height_px
+                  : (SIZE_SCALE[block.size] ?? 0.055)
+              const lines = fit?.lines ?? [block.text]
+              return (
+                <div
+                  key={block.id}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${ROLE_LABEL[block.role]}: ${block.text}`}
+                  onPointerDown={(e) => onPointerDown(e, block)}
+                  onKeyDown={(e) => onKeyDown(e, block)}
+                  onFocus={() => setSelected(block.id)}
+                  className={`absolute cursor-move select-none rounded px-1 outline-offset-2 ${
+                    selected === block.id ? "ring-2 ring-primary" : ""
+                  } ${
+                    overflowing.has(block.id)
+                      ? "ring-2 ring-destructive"
+                      : unsafe.has(block.id)
+                        ? "ring-2 ring-destructive"
+                        : ""
+                  }`}
+                  style={{
+                    left: `${block.x * 100}%`,
+                    top: `${block.y * 100}%`,
+                    width: `${block.width * 100}%`,
+                    color: block.colour,
+                    fontSize: `${heightFraction * 100}cqh`,
+                    fontWeight: block.weight === "bold" ? 700 : 400,
+                    textAlign: block.align === "centre" ? "center" : block.align,
+                    textShadow: block.shadow ? "0 0 0.18em rgba(0,0,0,0.55)" : undefined,
+                    lineHeight: LINE_HEIGHT,
+                    // Each line is its own row, and the SVG emits one <tspan>
+                    // per line at the same spacing — so the break the operator
+                    // sees is the break that exports. `nowrap` keeps the browser
+                    // from adding breaks of its own that the SVG would not have.
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {lines.map((line, i) => (
+                    <span key={i} className="malayalam block">
+                      {line}
+                    </span>
+                  ))}
+                </div>
+              )
+            })}
           </div>
+
+          {/*
+            Warnings come before the export buttons, deliberately. They used to
+            render below them, so the operator could reach "Export SVG" without
+            the overflow warning ever entering view.
+          */}
+          {overflowing.size > 0 && (
+            <div
+              role="alert"
+              className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm"
+            >
+              <p className="font-medium text-destructive">
+                {overflowing.size === 1 ? "One line does" : `${overflowing.size} lines do`} not
+                fit the page.
+              </p>
+              {(check?.overflow ?? []).map((o) => (
+                <p key={o.id} className="mt-1 text-destructive">
+                  {o.message}
+                </p>
+              ))}
+              <p className="mt-1 text-muted-foreground">
+                Export is off until this is fixed — a poster with a line running off
+                the edge cannot be printed.
+              </p>
+            </div>
+          )}
+
+          {unsafe.size > 0 && (
+            <p role="alert" className="text-sm text-destructive">
+              {unsafe.size} line{unsafe.size === 1 ? "" : "s"} sit too close to the edge —
+              trimming will cut into them.
+            </p>
+          )}
+
+          {(check?.fitted ?? []).length > 0 && (
+            <div className="rounded-lg border bg-muted/40 p-3 text-sm">
+              <p className="font-medium">Made to fit</p>
+              {(check?.fitted ?? []).map((f) => (
+                <p key={f.id} className="mt-1 text-muted-foreground">
+                  {f.message}
+                </p>
+              ))}
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" onClick={() => bgInputRef.current?.click()}>
@@ -528,13 +611,13 @@ export function PosterDesigner() {
               <Button
                 variant="outline"
                 onClick={() => void exportPng()}
-                disabled={busy || blocks.length === 0}
+                disabled={busy || blocks.length === 0 || overflowing.size > 0}
               >
                 PNG proof
               </Button>
               <Button
                 onClick={() => void exportSvg()}
-                disabled={busy || blocks.length === 0}
+                disabled={busy || blocks.length === 0 || overflowing.size > 0}
               >
                 Export SVG
               </Button>
@@ -552,17 +635,6 @@ export function PosterDesigner() {
             }}
           />
 
-          {unsafe.size > 0 && (
-            <p role="alert" className="text-sm text-destructive">
-              {unsafe.size} line{unsafe.size === 1 ? "" : "s"} sit too close to the edge —
-              trimming will cut into them.
-            </p>
-          )}
-          {(check?.overflow ?? []).map((o) => (
-            <p key={o.id} className="text-sm text-[color:var(--warn)]">
-              {o.message}
-            </p>
-          ))}
         </div>
 
         {/* Steps */}
