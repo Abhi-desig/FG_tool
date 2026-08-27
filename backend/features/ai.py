@@ -134,6 +134,14 @@ class AiError(RuntimeError):
     """Something about the request itself is wrong, before any spend."""
 
 
+class OverBudget(AiError):
+    """The month's budget is used up and no override was given.
+
+    Separate from `AiError` so the API layer can answer with a status the UI can
+    act on — offering the override — rather than a generic refusal.
+    """
+
+
 @dataclass
 class AiResult:
     """The outcome of one call. Never raises past the caller's work."""
@@ -186,17 +194,60 @@ def cost_of(model_or_role: str, batch: bool = False) -> int:
     return max(cost_of(r.key, batch) for r in matches)
 
 
+def has_batch_discount(feature: Feature) -> bool:
+    """Whether waiting actually saves anything on this job.
+
+    Only artwork defines a batch rate. The module docstring says "Batch is the
+    default. Half price for a few minutes' wait" — true for artwork, and for
+    photo editing and layout planning a wait for nothing (NEXT.md 1.4). The UI
+    hides the toggle where this is false rather than offering a saving that does
+    not exist.
+    """
+    return ROLE_BY_FEATURE[feature].batch_rate_paise is not None
+
+
 def estimate(feature: Feature, batch: bool) -> dict[str, Any]:
     """What this will cost, before committing to it."""
     role = ROLE_BY_FEATURE[feature]
-    paise = cost_of(role.key, batch)
+    discount = has_batch_discount(feature)
+    # Asking for batch where there is no batch rate is not an error, but it must
+    # not be reported as a saving either.
+    paise = cost_of(role.key, batch and discount)
     return {
         "feature": feature,
         "model": model_for(role),
         "batch": batch,
         "cost_paise": paise,
         "cost_rupees": round(paise / 100, 2),
+        "batch_discount": discount,
+        "instant_paise": cost_of(role.key, False),
+        "batch_paise": cost_of(role.key, True) if discount else None,
     }
+
+
+def check_budget(feature: Feature, batch: bool, override: bool = False) -> None:
+    """Refuse a paid call once the month's budget is gone.
+
+    `over_budget` existed and was consumed in exactly one place: the colour of a
+    bar in the Settings screen. No paid route consulted it, so `/ai/artwork`,
+    `/ai/photo-edit` and `/ai/layout-plan` would spend past ₹2,000 indefinitely
+    (NEXT.md 1.1). The budget is now a limit rather than a decoration.
+
+    `override` is the operator's explicit "spend anyway" — this is their shop and
+    their money, so the ceiling must be passable. It just may not be passed by
+    accident.
+    """
+    if override:
+        return
+    status = budget_status()
+    if not status["over_budget"]:
+        return
+    raise OverBudget(
+        f"This month's AI spending has reached ₹{status['spent_rupees']:.2f}, past "
+        f"the ₹{status['budget_rupees']:.0f} budget. Nothing was sent and nothing "
+        f"was charged. Check Google's console for the real figure — this total is "
+        f"an estimate — then tick “spend past the budget” to continue."
+    )
 
 
 def is_configured() -> bool:
@@ -387,6 +438,47 @@ def model_settings(live: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     }
 
 
+# Models that can be auto-selected when a configured name is retired and none of
+# the role's own fallbacks are available either.
+#
+# An allowlist by *family*, so a name Google has not invented yet
+# ("gemini-4-flash") is still eligible while an embedding, TTS, or vision-only
+# model never is. Auto-selection is a last resort; anything outside this is the
+# operator's deliberate choice in Settings, not ours.
+_GENERATIVE_FAMILIES = ("gemini-",)
+
+# Substrings that mean "not a text/image generator", whatever the family.
+_NOT_GENERATIVE = (
+    "embedding",
+    "embed",
+    "aqa",
+    "tts",
+    "text-to-speech",
+    "imagen",  # a different API surface; generate_content does not drive it
+    "veo",
+    "live",
+)
+
+
+def _safe_last_resort(role: Role, live: list[dict[str, Any]]) -> str | None:
+    """A model of the right shape that is plausibly able to do the job.
+
+    See the call site: the previous rule could hand the layout role an embedding
+    model. This refuses rather than guesses.
+    """
+    for model in live:
+        name = str(model["name"])
+        lowered = name.lower()
+        if not any(lowered.startswith(f) for f in _GENERATIVE_FAMILIES):
+            continue
+        if any(bad in lowered for bad in _NOT_GENERATIVE):
+            continue
+        if bool(model["image_output"]) != role.needs_image:
+            continue
+        return name
+    return None
+
+
 def resolve_models() -> dict[str, Any]:
     """Repair any model choice Google no longer honours.
 
@@ -407,15 +499,16 @@ def resolve_models() -> dict[str, Any]:
             (candidate for candidate in role.fallbacks if candidate in names), None
         )
         if replacement is None:
-            # Last resort: anything of the right shape that does exist.
-            replacement = next(
-                (
-                    m["name"]
-                    for m in live
-                    if m["image_output"] == role.needs_image
-                ),
-                None,
-            )
+            # Last resort — but only from a known-good family.
+            #
+            # This used to match on `image_output == role.needs_image`, where
+            # `image_output` is just `"image" in name`. For the layout role that
+            # meant "the first model alphabetically without 'image' in its name",
+            # and because the `supported_actions` filter deliberately admits
+            # models that report no actions at all, an embedding model could win
+            # and then fail mid-job (NEXT.md 1.3). Leaving it unset and saying so
+            # is better than picking something that cannot do the work.
+            replacement = _safe_last_resort(role, live)
         if replacement is None:
             notes.append(
                 f"{role.label}: {current} is gone and nothing here can replace it. "
@@ -462,6 +555,7 @@ def edit_photo(
     media_type: str,
     values: dict[str, str],
     batch: bool = False,
+    over_budget_ok: bool = False,
 ) -> AiResult:
     """Apply an instruction to a client photograph."""
     template = prompts.active_prompt("photo-edit")
@@ -476,6 +570,13 @@ def edit_photo(
     )
     if not values.get("instruction", "").strip():
         result.error = "Say what should change about the photo."
+        return result
+
+    # Before the request, so a refusal costs nothing and is not recorded as one.
+    try:
+        check_budget("photo-edit", batch, over_budget_ok)
+    except OverBudget as exc:
+        result.error = str(exc)
         return result
 
     try:
@@ -498,7 +599,11 @@ def edit_photo(
 
     data, mime = _extract_image(response)
     if data is None:
-        result.error = "Google returned no image. Nothing was charged."
+        result.error = (
+            "Google returned a reply but no image. This may still have been "
+            "billed — the app cannot know. Check Google's console before "
+            "assuming it was free."
+        )
         return _record(result)
 
     result.ok = True
@@ -529,7 +634,10 @@ def artwork_prompt(values: dict[str, str], style_key: str | None = None) -> str:
 
 
 def generate_artwork(
-    values: dict[str, str], batch: bool = True, style_key: str | None = None
+    values: dict[str, str],
+    batch: bool = True,
+    style_key: str | None = None,
+    over_budget_ok: bool = False,
 ) -> AiResult:
     """Make a background picture. Never any words in it — the app draws those.
 
@@ -567,6 +675,12 @@ def generate_artwork(
         return result
 
     try:
+        check_budget("poster-artwork", batch, over_budget_ok)
+    except OverBudget as exc:
+        result.error = str(exc)
+        return result
+
+    try:
         response = _client().models.generate_content(model=model, contents=text)
     except AiError as exc:
         result.error = str(exc)
@@ -578,7 +692,11 @@ def generate_artwork(
 
     data, mime = _extract_image(response)
     if data is None:
-        result.error = "Google returned no image. Nothing was charged."
+        result.error = (
+            "Google returned a reply but no image. This may still have been "
+            "billed — the app cannot know. Check Google's console before "
+            "assuming it was free."
+        )
         return _record(result)
 
     result.ok = True
@@ -616,7 +734,7 @@ def parse_layout(text: str) -> dict[str, Any]:
     return parsed
 
 
-def plan_layout(values: dict[str, str]) -> AiResult:
+def plan_layout(values: dict[str, str], over_budget_ok: bool = False) -> AiResult:
     """Ask where the words should go. **Data only — never pixels with text.**
 
     This is the constraint the whole poster feature rests on: the AI chooses
@@ -635,6 +753,12 @@ def plan_layout(values: dict[str, str]) -> AiResult:
     )
     if not values.get("headline", "").strip():
         result.error = "A poster needs a headline to lay out."
+        return result
+
+    try:
+        check_budget("poster-layout", False, over_budget_ok)
+    except OverBudget as exc:
+        result.error = str(exc)
         return result
 
     try:
@@ -662,18 +786,48 @@ def plan_layout(values: dict[str, str]) -> AiResult:
     return _record(result)
 
 
+# Where a re-inserted block goes when the model dropped it entirely. Matches the
+# designer's own opening layout, so a recovered line lands somewhere sensible
+# rather than on top of another one.
+_FALLBACK_PLACEMENT: dict[str, dict[str, Any]] = {
+    "occasion": {"y": 0.10, "size": "medium"},
+    "headline": {"y": 0.22, "size": "large"},
+    "offer": {"y": 0.45, "size": "huge"},
+    "phone": {"y": 0.86, "size": "small"},
+}
+
+
 def verify_text_unchanged(
     layout: dict[str, Any], values: dict[str, str]
 ) -> tuple[dict[str, Any], list[str]]:
-    """Put the operator's exact words back if the AI altered them.
+    """Put the operator's exact words back if the AI altered *or dropped* them.
 
     The model is asked to copy text verbatim, and it mostly does. Mostly is not
-    good enough for a phone number or a Malayalam headline, so anything that
-    came back changed is replaced with what was typed and the row is flagged.
+    good enough for a phone number or a Malayalam headline, so anything that came
+    back changed is replaced with what was typed and the row is flagged.
+
+    **Dropping is checked too, and used not to be.** This only ever repaired
+    blocks that came back, so a layout that omitted the phone number — or
+    returned it under a different `id` — passed silently: the exact failure the
+    docstring claimed to prevent (NEXT.md 1.2). Every non-empty input field must
+    now appear in the result, or it is re-inserted and said out loud.
     """
     notes: list[str] = []
     blocks = layout.get("blocks")
     if not isinstance(blocks, list):
+        # No usable blocks at all: rebuild from what was typed rather than
+        # handing back a layout with none of the operator's words in it.
+        rebuilt = [
+            {"id": key, "text": text.strip(), **_FALLBACK_PLACEMENT.get(key, {"y": 0.5})}
+            for key, text in values.items()
+            if text and text.strip()
+        ]
+        if rebuilt:
+            notes.append(
+                "The AI returned no usable blocks — your lines were laid out with "
+                "the standard placement instead. Move them as you like."
+            )
+            return layout | {"blocks": rebuilt}, notes
         return layout, notes
 
     for block in blocks:
@@ -688,6 +842,23 @@ def verify_text_unchanged(
                 f"The AI changed the {key} text — your wording was put back."
             )
             block["text"] = original
+
+    # Anything the model never returned. Re-inserted rather than lost: losing a
+    # line of the client's wording is exactly the invisible error this shop
+    # cannot afford, and it is the one this function exists to stop.
+    returned = {
+        str(b.get("id", "")) for b in blocks if isinstance(b, dict)
+    }
+    for key, text in values.items():
+        if not text or not text.strip() or key in returned:
+            continue
+        placement = _FALLBACK_PLACEMENT.get(key, {"y": 0.5, "size": "medium"})
+        blocks.append({"id": key, "text": text.strip(), **placement})
+        notes.append(
+            f"The AI left out the {key} line — it was added back at the standard "
+            f"position. Check where it sits."
+        )
+
     return layout, notes
 
 

@@ -41,3 +41,18 @@ def isolated_workdir(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]
         yield
     finally:
         config.WORK_DIR = original
+
+
+@pytest.fixture(autouse=True)
+def empty_spend_ledger() -> Iterator[None]:
+    """Start every test inside the AI budget.
+
+    Paid routes refuse once the month's budget is spent (NEXT.md 1.1), and the
+    session shares one database — so a few dozen tests recording ~₹11.50 apiece
+    took the ledger past ₹2,000 and every later test was refused for being over
+    budget rather than for the reason it was testing. Each test now starts from
+    zero, which also makes the budget tests themselves deterministic.
+    """
+    db.connect().execute("DELETE FROM ai_spend")
+    db.connect().commit()
+    yield

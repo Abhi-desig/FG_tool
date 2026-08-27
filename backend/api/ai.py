@@ -275,9 +275,11 @@ def _result(result: ai.AiResult) -> dict[str, object]:
 @router.post("/ai/photo-edit")
 def photo_edit(
     file: Annotated[UploadFile, File()],
-    instruction: Annotated[str, Form()],
-    preserve: Annotated[str, Form()] = "",
+    # Bounded, like every other field that reaches a prompt — see ArtworkIn.
+    instruction: Annotated[str, Form(max_length=2000)],
+    preserve: Annotated[str, Form(max_length=2000)] = "",
     batch: Annotated[bool, Form()] = False,
+    over_budget_ok: Annotated[bool, Form()] = False,
 ) -> dict[str, object]:
     """Sends the client's photograph to Google. The UI must say so."""
     data = file.file.read(config.MAX_UPLOAD_BYTES + 1)
@@ -293,7 +295,11 @@ def photo_edit(
     media = f"image/{(loaded.format or 'PNG').lower()}"
     return _result(
         ai.edit_photo(
-            data, media, {"instruction": instruction, "preserve": preserve}, batch
+            data,
+            media,
+            {"instruction": instruction, "preserve": preserve},
+            batch,
+            over_budget_ok,
         )
     )
 
@@ -316,13 +322,18 @@ class ArtworkIn(BaseModel):
     idea: str = Field(default="", max_length=2000)
     # Free-form fallback, and what the prompt-library template still uses.
     subject: str = Field(default="", max_length=2000)
-    style: str = ""
-    palette: str = ""
-    aspect: str = ""
+    # Every field that reaches a prompt is bounded. Cost is recorded as a flat
+    # per-call rate whatever the token count, so an unbounded field grows the
+    # real Google bill while the budget meter does not move (NEXT.md 1.1).
+    style: str = Field(default="", max_length=200)
+    palette: str = Field(default="", max_length=200)
+    aspect: str = Field(default="", max_length=100)
     batch: bool = True
+    # The operator's explicit "spend past the budget". Never defaulted on.
+    over_budget_ok: bool = False
 
     def values(self) -> dict[str, str]:
-        return self.model_dump(exclude={"batch", "style_key"})
+        return self.model_dump(exclude={"batch", "style_key", "over_budget_ok"})
 
 
 @router.post("/ai/artwork/prompt")
@@ -343,18 +354,28 @@ def artwork_prompt(body: ArtworkIn) -> dict[str, object]:
 
 @router.post("/ai/artwork")
 def artwork(body: ArtworkIn) -> dict[str, object]:
-    return _result(ai.generate_artwork(body.values(), body.batch, body.style_key))
+    return _result(
+        ai.generate_artwork(
+            body.values(), body.batch, body.style_key, body.over_budget_ok
+        )
+    )
 
 
 class LayoutPlanIn(BaseModel):
     headline: str = Field(min_length=1, max_length=500)
-    offer: str = ""
-    phone: str = ""
-    occasion: str = ""
-    tone: str = ""
+    # Bounded for the same reason as ArtworkIn's — see the note there.
+    offer: str = Field(default="", max_length=500)
+    phone: str = Field(default="", max_length=100)
+    occasion: str = Field(default="", max_length=200)
+    tone: str = Field(default="", max_length=200)
+    over_budget_ok: bool = False
 
 
 @router.post("/ai/layout-plan")
 def layout_plan(body: LayoutPlanIn) -> dict[str, object]:
     """Text only — the AI returns positions, never a picture containing words."""
-    return _result(ai.plan_layout(body.model_dump()))
+    return _result(
+        ai.plan_layout(
+            body.model_dump(exclude={"over_budget_ok"}), body.over_budget_ok
+        )
+    )

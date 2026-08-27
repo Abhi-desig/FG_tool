@@ -406,3 +406,196 @@ def test_the_active_prompt_is_what_a_feature_uses(
 def test_unknown_scope_is_refused() -> None:
     with pytest.raises(prompts.PromptError, match="unknown scope"):
         prompts.validate("make-me-rich", "anything")
+
+
+# --- the budget is a limit, not a decoration (NEXT.md 1.1) ----------------
+
+
+def image_client(monkeypatch: pytest.MonkeyPatch, data: bytes | None = b"PNG") -> FakeClient:
+    """A client whose reply carries an image, or a reply with no image at all."""
+    return fake(monkeypatch, response=FakeResponse([FakePart(data=data)]))
+
+
+def spend(paise: int) -> None:
+    """Put a real amount into the ledger."""
+    db.record_spend(
+        feature="poster-artwork", model="m", cost_paise=paise, batch=False, status="ok"
+    )
+
+
+def test_over_budget_refuses_a_paid_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`over_budget` was consumed only by the colour of a bar in Settings.
+
+    No paid route consulted it, so /ai/artwork, /ai/photo-edit and
+    /ai/layout-plan would spend past ₹2,000 indefinitely.
+    """
+    client = image_client(monkeypatch)
+    spend(ai.MONTHLY_BUDGET_PAISE + 1)
+
+    result = ai.generate_artwork({"subject": "a temple"})
+    assert result.ok is False
+    assert "budget" in (result.error or "").lower()
+    assert result.cost_paise == 0
+    # And nothing was sent: a refusal must not cost anything.
+    assert client.models.calls == []
+
+
+def test_over_budget_refuses_photo_edit_and_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All three paid routes, not just the one."""
+    image_client(monkeypatch)
+    spend(ai.MONTHLY_BUDGET_PAISE + 1)
+
+    photo = ai.edit_photo(b"x", "image/png", {"instruction": "tidy it"})
+    assert photo.ok is False and "budget" in (photo.error or "").lower()
+
+    layout = ai.plan_layout({"headline": "SALE"})
+    assert layout.ok is False and "budget" in (layout.error or "").lower()
+
+
+def test_the_operator_can_deliberately_spend_past_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It is the shop's money. The ceiling must be passable — just not by accident."""
+    image_client(monkeypatch)
+    spend(ai.MONTHLY_BUDGET_PAISE + 1)
+
+    result = ai.generate_artwork({"subject": "a temple"}, over_budget_ok=True)
+    assert result.ok is True
+
+
+def test_inside_the_budget_nothing_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    image_client(monkeypatch)
+    spend(100)
+    assert ai.generate_artwork({"subject": "a temple"}).ok is True
+
+
+# --- a dropped layout block must not pass silently (NEXT.md 1.2) ----------
+
+
+def test_a_layout_block_the_ai_omitted_is_put_back() -> None:
+    """The exact failure `verify_text_unchanged`'s own docstring claimed to stop.
+
+    It only ever repaired blocks that came back, so a layout omitting the phone
+    number passed with no complaint at all.
+    """
+    values = {"headline": "GRAND SALE", "phone": "9847 000 000"}
+    layout = {"blocks": [{"id": "headline", "text": "GRAND SALE", "y": 0.2}]}
+
+    fixed, notes = ai.verify_text_unchanged(layout, values)
+
+    ids = {b["id"] for b in fixed["blocks"]}
+    assert "phone" in ids, "the phone number was silently dropped"
+    phone = next(b for b in fixed["blocks"] if b["id"] == "phone")
+    assert phone["text"] == "9847 000 000"
+    assert any("left out the phone" in n for n in notes), notes
+
+
+def test_a_block_returned_under_a_different_id_is_treated_as_missing() -> None:
+    """Renaming the id is the same failure wearing a hat."""
+    values = {"headline": "GRAND SALE", "phone": "9847 000 000"}
+    layout = {"blocks": [{"id": "telephone", "text": "9847 000 000", "y": 0.8}]}
+
+    fixed, notes = ai.verify_text_unchanged(layout, values)
+    ids = {b["id"] for b in fixed["blocks"]}
+    assert {"headline", "phone"} <= ids
+    assert len(notes) == 2, notes
+
+
+def test_empty_input_fields_are_not_invented() -> None:
+    """A field the operator left blank must not appear on the poster."""
+    values = {"headline": "SALE", "offer": "", "phone": "   "}
+    fixed, notes = ai.verify_text_unchanged(
+        {"blocks": [{"id": "headline", "text": "SALE"}]}, values
+    )
+    assert {b["id"] for b in fixed["blocks"]} == {"headline"}
+    assert notes == []
+
+
+def test_a_layout_with_no_usable_blocks_is_rebuilt() -> None:
+    values = {"headline": "SALE", "phone": "9847 000 000"}
+    fixed, notes = ai.verify_text_unchanged({"blocks": "nonsense"}, values)
+    assert {b["id"] for b in fixed["blocks"]} == {"headline", "phone"}
+    assert notes
+
+
+# --- auto-repair must not pick a nonsense model (NEXT.md 1.3) -------------
+
+
+def test_last_resort_never_picks_an_embedding_model() -> None:
+    """The old rule was "first model alphabetically without 'image' in its name".
+
+    Combined with a `supported_actions` filter that deliberately admits models
+    reporting no actions, an embedding model could win the layout role.
+    """
+    live = [
+        {"name": "embedding-001", "image_output": False},
+        {"name": "gemini-embedding-exp", "image_output": False},
+        {"name": "gemini-2.5-flash", "image_output": False},
+        {"name": "text-bison-001", "image_output": False},
+    ]
+    role = ai.ROLE_BY_KEY["layout"]
+    assert ai._safe_last_resort(role, live) == "gemini-2.5-flash"
+
+
+def test_last_resort_matches_the_shape_the_role_needs() -> None:
+    live = [
+        {"name": "gemini-2.5-flash", "image_output": False},
+        {"name": "gemini-2.5-flash-image", "image_output": True},
+    ]
+    assert (
+        ai._safe_last_resort(ai.ROLE_BY_KEY["artwork"], live) == "gemini-2.5-flash-image"
+    )
+
+
+def test_last_resort_refuses_rather_than_guessing() -> None:
+    """Nothing usable means say so, not pick the least-bad thing available."""
+    live = [
+        {"name": "embedding-001", "image_output": False},
+        {"name": "gemini-2.5-tts", "image_output": False},
+        {"name": "veo-3", "image_output": False},
+    ]
+    assert ai._safe_last_resort(ai.ROLE_BY_KEY["layout"], live) is None
+
+
+# --- batch that saves nothing (NEXT.md 1.4) ------------------------------
+
+
+def test_only_artwork_has_a_batch_discount() -> None:
+    """The docstring promises "half price for a few minutes' wait".
+
+    True for artwork. For photo editing and layout planning it was a wait for
+    nothing, and the toggle was offered anyway.
+    """
+    assert ai.has_batch_discount("poster-artwork") is True
+    assert ai.has_batch_discount("photo-edit") is False
+    assert ai.has_batch_discount("poster-layout") is False
+
+
+def test_the_estimate_says_whether_batch_saves_anything() -> None:
+    artwork = ai.estimate("poster-artwork", batch=True)
+    assert artwork["batch_discount"] is True
+    assert artwork["cost_paise"] < artwork["instant_paise"]
+
+    photo = ai.estimate("photo-edit", batch=True)
+    assert photo["batch_discount"] is False
+    assert photo["cost_paise"] == photo["instant_paise"]
+    assert photo["batch_paise"] is None
+
+
+# --- honest billing language ----------------------------------------------
+
+
+def test_a_reply_with_no_image_does_not_claim_it_was_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app cannot know. Google answered, so it may well have billed.
+
+    Phase 5's gate wants the ledger to reconcile with Google's console to within
+    a few rupees; asserting "nothing was charged" here drifts one way.
+    """
+    image_client(monkeypatch, data=None)
+    result = ai.generate_artwork({"subject": "a temple"})
+    assert result.ok is False
+    error = (result.error or "").lower()
+    assert "nothing was charged" not in error
+    assert "may still have been" in error and "console" in error

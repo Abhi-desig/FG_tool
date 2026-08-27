@@ -47,6 +47,11 @@ export function AiArtwork({
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [batch, setBatch] = useState(true)
   const [cost, setCost] = useState<number | null>(null)
+  /** Whether waiting actually saves anything here (NEXT.md 1.4). */
+  const [batchDiscount, setBatchDiscount] = useState(true)
+  /** The operator's explicit "spend past the budget" (NEXT.md 1.1). */
+  const [overBudgetOk, setOverBudgetOk] = useState(false)
+  const [overBudget, setOverBudget] = useState(false)
   const [idea, setIdea] = useState("")
   const [preview, setPreview] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -61,19 +66,26 @@ export function AiArtwork({
     idea,
     aspect,
     batch,
+    over_budget_ok: overBudgetOk,
   }
 
   const ready = copy.headline.trim().length > 0 && style !== null
 
   useEffect(() => {
     aiStatus()
-      .then((s) => setConfigured(s.configured))
+      .then((s) => {
+        setConfigured(s.configured)
+        setOverBudget(s.budget?.over_budget ?? false)
+      })
       .catch(() => setConfigured(false))
   }, [])
 
   useEffect(() => {
     aiEstimate("poster-artwork", batch)
-      .then((e) => setCost(e.cost_rupees))
+      .then((e) => {
+        setCost(e.cost_rupees)
+        setBatchDiscount(e.batch_discount)
+      })
       .catch(() => setCost(null))
   }, [batch])
 
@@ -165,17 +177,55 @@ export function AiArtwork({
         </p>
       </div>
 
-      <label className="flex items-center gap-2 text-sm">
-        <input
-          type="checkbox"
-          checked={batch}
-          onChange={(e) => setBatch(e.target.checked)}
-          className="size-4 accent-[color:var(--primary)]"
-        />
-        <span>Batch mode — half price, takes a few minutes</span>
-      </label>
+      {/*
+        NEXT.md 1.4: the toggle was shown on all three AI features but only
+        artwork has a batch rate. Offering a wait that saves nothing is worse
+        than not offering it.
+      */}
+      {batchDiscount && (
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={batch}
+            onChange={(e) => setBatch(e.target.checked)}
+            className="size-4 accent-[color:var(--primary)]"
+          />
+          <span>Batch mode — half price, takes a few minutes</span>
+        </label>
+      )}
 
-      <Button onClick={() => void run()} disabled={busy || !ready} className="w-full">
+      {/*
+        NEXT.md 1.1: the ₹2,000 budget was decorative — no paid route consulted
+        it. The server now refuses past it, so the override has to be reachable
+        here: it is the shop's money, and the ceiling must be passable. Just not
+        by accident.
+      */}
+      {overBudget && (
+        <div className="rounded-lg border border-[color:var(--warn)]/50 bg-[color:var(--warn)]/10 p-3">
+          <p className="text-sm font-medium">
+            This month&rsquo;s ₹2,000 AI budget is used up.
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            The figure here is an estimate — check Google&rsquo;s console for the
+            real one before deciding.
+          </p>
+          <label className="mt-2 flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={overBudgetOk}
+              onChange={(e) => setOverBudgetOk(e.target.checked)}
+              className="size-4 accent-[color:var(--primary)]"
+            />
+            <span>Spend past the budget anyway</span>
+          </label>
+        </div>
+      )}
+
+      <Button
+        onClick={() => void run()}
+        disabled={busy || !ready || (overBudget && !overBudgetOk)}
+        className="w-full"
+      >
         {busy
           ? "Making the picture…"
           : `Make the picture${cost != null ? ` · ₹${cost.toFixed(2)}` : ""}`}

@@ -21,11 +21,19 @@ export function AiPhotoEdit({ file }: { file: File }) {
   const [preserve, setPreserve] = useState("")
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<AiResult | null>(null)
+  /** NEXT.md 1.1 — the budget is now a limit, so its override must be reachable. */
+  const [overBudget, setOverBudget] = useState(false)
+  const [overBudgetOk, setOverBudgetOk] = useState(false)
 
   useEffect(() => {
     aiStatus()
-      .then((s) => setConfigured(s.configured))
+      .then((s) => {
+        setConfigured(s.configured)
+        setOverBudget(s.budget?.over_budget ?? false)
+      })
       .catch(() => setConfigured(false))
+    // No batch toggle here: photo editing has no batch rate, so waiting would
+    // save nothing (NEXT.md 1.4).
     aiEstimate("photo-edit", false)
       .then((e) => setCost(e.cost_rupees))
       .catch(() => setCost(null))
@@ -35,7 +43,7 @@ export function AiPhotoEdit({ file }: { file: File }) {
     if (!instruction.trim()) return
     setBusy(true)
     try {
-      const outcome = await editPhoto(file, instruction, preserve)
+      const outcome = await editPhoto(file, instruction, preserve, overBudgetOk)
       setResult(outcome)
       if (outcome.ok) {
         toast.success(`Edited · ₹${outcome.cost_rupees.toFixed(2)}`, {
@@ -50,7 +58,7 @@ export function AiPhotoEdit({ file }: { file: File }) {
     } finally {
       setBusy(false)
     }
-  }, [file, instruction, preserve])
+  }, [file, instruction, preserve, overBudgetOk])
 
   if (configured === false) {
     return (
@@ -91,7 +99,31 @@ export function AiPhotoEdit({ file }: { file: File }) {
         />
       </div>
 
-      <Button onClick={() => void run()} disabled={busy || !instruction.trim()}>
+      {overBudget && (
+        <div className="rounded-lg border border-[color:var(--warn)]/50 bg-[color:var(--warn)]/10 p-3">
+          <p className="text-sm font-medium">
+            This month&rsquo;s ₹2,000 AI budget is used up.
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            That total is an estimate — check Google&rsquo;s console for the real
+            figure before deciding.
+          </p>
+          <label className="mt-2 flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={overBudgetOk}
+              onChange={(e) => setOverBudgetOk(e.target.checked)}
+              className="size-4 accent-[color:var(--primary)]"
+            />
+            <span>Spend past the budget anyway</span>
+          </label>
+        </div>
+      )}
+
+      <Button
+        onClick={() => void run()}
+        disabled={busy || !instruction.trim() || (overBudget && !overBudgetOk)}
+      >
         {busy ? "Editing…" : `Edit${cost != null ? ` · ₹${cost.toFixed(2)}` : ""}`}
       </Button>
 

@@ -673,7 +673,15 @@ export function aiStatus(): Promise<{
 export function aiEstimate(
   feature: AiFeature,
   batch: boolean,
-): Promise<{ cost_rupees: number; cost_paise: number; model: string }> {
+): Promise<{
+  cost_rupees: number
+  cost_paise: number
+  model: string
+  /** False when waiting saves nothing on this feature — hide the toggle. */
+  batch_discount: boolean
+  instant_paise: number
+  batch_paise: number | null
+}> {
   return request(`/api/ai/estimate?feature=${feature}&batch=${batch}`)
 }
 
@@ -717,11 +725,13 @@ export function editPhoto(
   file: File,
   instruction: string,
   preserve: string,
+  overBudgetOk = false,
 ): Promise<AiResult> {
   const form = new FormData()
   form.append("file", file)
   form.append("instruction", instruction)
   form.append("preserve", preserve)
+  form.append("over_budget_ok", String(overBudgetOk))
   return upload<AiResult>("/api/ai/photo-edit", form)
 }
 
@@ -745,6 +755,8 @@ export interface ArtworkRequest {
   palette?: string
   aspect?: string
   batch?: boolean
+  /** The operator's explicit "spend past the monthly budget". */
+  over_budget_ok?: boolean
 }
 
 export function generateArtwork(body: ArtworkRequest): Promise<AiResult> {
