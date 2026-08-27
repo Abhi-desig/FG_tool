@@ -11,7 +11,10 @@ from PIL import Image, ImageDraw
 
 from backend.main import app
 
-client = TestClient(app)
+# base_url is a loopback address deliberately: `guard.LocalOnlyMiddleware`
+# refuses any Host that is not this machine, and TestClient's default
+# `http://testserver` is exactly the DNS-rebinding shape it exists to stop.
+client = TestClient(app, base_url="http://127.0.0.1:8000")
 SVG_NS = "{http://www.w3.org/2000/svg}"
 
 

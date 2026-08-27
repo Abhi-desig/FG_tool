@@ -13,7 +13,10 @@ from openpyxl.styles import Font
 from backend.features import translate
 from backend.main import app
 
-client = TestClient(app)
+# base_url is a loopback address deliberately: `guard.LocalOnlyMiddleware`
+# refuses any Host that is not this machine, and TestClient's default
+# `http://testserver` is exactly the DNS-rebinding shape it exists to stop.
+client = TestClient(app, base_url="http://127.0.0.1:8000")
 
 HAS_ENGINE = translate.available_engine() is not None
 needs_engine = pytest.mark.skipif(not HAS_ENGINE, reason="no engine downloaded")

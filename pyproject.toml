@@ -16,11 +16,20 @@ dependencies = [
 
 # Installed per phase so the font converter never pulls down 3.5 GB.
 #   uv sync --extra images
+#
+# This claim is now actually true. `backend/main.py` used to import every feature
+# router at module level, so a base install could not start the server at all —
+# see the note above `_mount` there. Routers are mounted individually and a
+# missing extra disables that one feature.
 [project.optional-dependencies]
 images = [
     "rembg>=2.0.81",
     "onnxruntime>=1.29.0",
     "pillow>=12.0",
+    # Declared explicitly. `features/images.py` and `features/posters.py` both
+    # `import numpy` directly, and it was only ever arriving transitively via
+    # rembg/onnxruntime — an undeclared direct dependency (NEXT.md 2.6).
+    "numpy>=2.1",
 ]
 translate = [
     "torch>=2.13",

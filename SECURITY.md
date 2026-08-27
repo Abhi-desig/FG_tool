@@ -24,6 +24,29 @@ that is the trade, and it only holds while the bind address holds.
 - No CORS wildcard. The frontend is served from the same origin; no cross-origin access is needed.
 - Do not add a "share on the network" feature without redesigning auth first.
 
+**But the bind address is not the whole answer, and this section used to imply it was.** It stops
+the shop's Wi-Fi. It does nothing about a page already open in the operator's own browser: a
+multipart `POST` is a CORS *simple* request — no preflight, no permission asked — so any site could
+fire one at `127.0.0.1:8000`. It cannot read the reply, but it does not need to; the Google spend
+on `/api/ai/photo-edit` and the CPU burn on `/api/images/upscale` happen anyway, and on a 12 GB
+machine a queue of upscales is the whole PC. DNS rebinding was open for the same reason.
+
+Two checks in [`backend/guard.py`](backend/guard.py) close this:
+
+- **`Host` must be a loopback name** (`127.0.0.1`, `localhost`, `::1`), else `421`. This is what
+  stops DNS rebinding — a rebound request arrives carrying the attacker's hostname, and nothing
+  else distinguishes it.
+- **`Origin` / `Sec-Fetch-Site` must be same-origin on every state-changing method** (`POST`,
+  `PUT`, `PATCH`, `DELETE`), else `403`. `Sec-Fetch-Site` cannot be forged from script, which makes
+  it a stronger signal than a CSRF token on a single-origin app with nothing to rotate it.
+- A request with **no** `Origin` and **no** `Sec-Fetch-Site` is allowed: that is `curl`,
+  `check-ai.command`, and the test client — all local, all deliberate, none of them a browser being
+  used as a weapon. `GET` is never blocked on origin; reads change nothing and the same-origin
+  policy already stops the reply being read.
+
+No token is minted. A token would have to live somewhere the page can read, which adds a moving
+part without adding a barrier the headers above do not already provide.
+
 ## 2 · API keys
 
 Keys are the only thing here with direct monetary value.
@@ -62,6 +85,14 @@ WhatsApp.
 - Validate **content type and magic bytes**, not the file extension.
 - Cap file size and pixel dimensions. A decompression bomb will take down a 12 GB machine.
   Set `Image.MAX_IMAGE_PIXELS` deliberately rather than leaving Pillow's default.
+  Implemented in [`features/images.py`](backend/features/images.py) as
+  `MAX_INPUT_PIXELS` (150 MP) and `MAX_INPUT_SIDE` (30,000 px), checked from the *header* in
+  `load()` before any decode — a bomb is small on disk, so the byte cap never sees it. The side cap
+  exists on its own because a `1 × 200,000,000` strip passes a pixel-count test and still breaks
+  everything downstream. `Image.MAX_IMAGE_PIXELS` sits just above our own limit so our message is
+  the one the operator gets.
+- Never offer an output size that cannot be produced. `/api/images/inspect` marks each scale option
+  `possible`, because it used to quote a 9.2 Gpx upscale at 62 minutes and 62,500 tiles.
 - Excel: `openpyxl` with formulas not evaluated. Treat cell contents as text, never as anything
   executable.
 - Validate every request body with Pydantic. No hand-rolled dict parsing.

@@ -166,6 +166,13 @@ export function ImageTools() {
     return option ? [option.width, option.height] : null
   })()
 
+  /** Why the chosen scale cannot be produced, if it cannot. */
+  const impossible = ((): string | null => {
+    if (!inspection || scale === "print") return null
+    const option = inspection.scale_options.find((o) => o.scale === scale)
+    return option && !option.possible ? (option.why_not ?? "Not possible.") : null
+  })()
+
   const onDrop = (event: React.DragEvent) => {
     event.preventDefault()
     setDragging(false)
@@ -416,7 +423,14 @@ export function ImageTools() {
                   className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1"
                 >
                   {(["2x", "4x", "print"] as const).map((option) => {
-                    const disabled = option === "print" && !assessment?.upscale_to
+                    // A scale whose output cannot be assembled or written is
+                    // refused here rather than quoted at 62 minutes and then
+                    // failing (NEXT.md 2.1).
+                    const spec = inspection.scale_options.find((o) => o.scale === option)
+                    const disabled =
+                      option === "print"
+                        ? !assessment?.upscale_to
+                        : spec?.possible === false
                     return (
                       <button
                         key={option}
@@ -424,6 +438,7 @@ export function ImageTools() {
                         role="radio"
                         aria-checked={scale === option}
                         disabled={disabled}
+                        title={spec?.why_not ?? undefined}
                         onClick={() => setScale(option)}
                         className={`rounded-md px-2 py-1.5 text-sm transition-colors disabled:opacity-40 ${
                           scale === option
@@ -441,9 +456,11 @@ export function ImageTools() {
                     ? assessment?.upscale_to
                       ? "Exactly the pixels this print size needs."
                       : "Already big enough for this print size."
-                    : outputSize
-                      ? `Gives ${outputSize[0]}×${outputSize[1]} px.`
-                      : ""}
+                    : impossible
+                      ? impossible
+                      : outputSize
+                        ? `Gives ${outputSize[0]}×${outputSize[1]} px.`
+                        : ""}
                 </p>
               </div>
 

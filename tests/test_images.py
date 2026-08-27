@@ -55,11 +55,19 @@ def test_load_rejects_empty_input() -> None:
 def test_decompression_bomb_limit_is_set_deliberately() -> None:
     """Still a limit, but one that admits real work.
 
-    SECURITY.md wants a deliberate ceiling; the operator wants any genuine scan
-    to open. Both hold: finite, but far above any real photograph.
+    SECURITY.md §4 wants a deliberate ceiling on pixel *dimensions*, and there
+    was none — the only guard was `MAX_IMAGE_PIXELS` at 1 Gpx, eleven times
+    Pillow's own default, where an RGBA decode is ~4 GB on a 12 GB machine
+    (NEXT.md 2.1).
+
+    Pillow's limit sits just above ours so `load` refuses first, with a sentence
+    the operator can act on rather than one they cannot.
     """
     assert Image.MAX_IMAGE_PIXELS is not None, "an unbounded decoder is a bomb risk"
-    assert Image.MAX_IMAGE_PIXELS >= 500_000_000, "must admit large scans"
+    assert Image.MAX_IMAGE_PIXELS > images.MAX_INPUT_PIXELS
+    # A 6x4 ft banner at 300 DPI is 311 Mpx and is not an input; 150 MP still
+    # covers every flatbed scan and camera file this shop sees.
+    assert images.MAX_INPUT_PIXELS >= 100_000_000, "must admit large scans"
 
 
 def test_facts_reports_what_the_ui_needs() -> None:
@@ -166,7 +174,50 @@ def test_any_input_shape_is_accepted(pixels: tuple[int, int]) -> None:
 
 def test_decode_limit_admits_a_large_scan() -> None:
     """A print shop handles 100+ MP scans; only a real bomb should be refused."""
-    assert Image.MAX_IMAGE_PIXELS >= 500_000_000
+    assert images.MAX_INPUT_PIXELS >= 100_000_000
+    # 12000x10000 is a big flatbed scan and must still open.
+    images._check_dimensions((12_000, 10_000))
+
+
+def test_an_oversized_image_is_refused_with_a_usable_message() -> None:
+    """The measured case: a 546 KB PNG at 24000x24000 was accepted (NEXT.md 2.1).
+
+    Bombs are small on disk, so the 1 GB byte cap never sees them. The header is
+    checked before the decode, which is the only point at which refusing is free.
+    """
+    with pytest.raises(images.ImageError) as caught:
+        images._check_dimensions((24_000, 24_000))
+    message = str(caught.value)
+    assert "24000" in message
+    # It must say what to do, not just that it refused.
+    assert "smaller version" in message
+
+
+def test_a_pathological_strip_is_refused_on_its_long_side() -> None:
+    """1 x 200,000,000 passes a pixel-count test and breaks everything after."""
+    with pytest.raises(images.ImageError):
+        images._check_dimensions((200_000, 1))
+
+
+def test_the_side_cap_is_checked_before_the_pixel_cap() -> None:
+    """So the message names the real problem: one enormous dimension."""
+    with pytest.raises(images.ImageError) as caught:
+        images._check_dimensions((images.MAX_INPUT_SIDE + 1, 2))
+    assert "longest side" in str(caught.value)
+
+
+def test_an_oversized_upload_is_refused_by_load() -> None:
+    """End to end through the real entry point, on real bytes.
+
+    A flat colour compresses to almost nothing, which is exactly why the byte
+    cap cannot be the defence.
+    """
+    buffer = io.BytesIO()
+    Image.new("L", (18_000, 18_000), 0).save(buffer, format="PNG")
+    data = buffer.getvalue()
+    assert len(data) < 5_000_000, "fixture is not a compression bomb"
+    with pytest.raises(images.ImageError):
+        images.load(data)
 
 
 def test_upload_cap_is_generous_enough_for_real_files() -> None:

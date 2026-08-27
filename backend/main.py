@@ -10,22 +10,24 @@ import shutil
 import threading
 import webbrowser
 from contextlib import asynccontextmanager
+from importlib import import_module
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from backend import config, db, jobs, models
-from backend.api import ai as ai_api
-from backend.api import excel as excel_api
-from backend.api import images as images_api
-from backend.api import posters as posters_api
-from backend.api import styles as styles_api
-from backend.features import fonts, prompts, styles
+from backend import config, guard, jobs
+from backend.features import fonts
 
 MAX_INPUT_CHARS = 20_000
+
+# Bounds on a preferences write. Generous — these are model names and colour
+# choices — but present, which they were not.
+MAX_PREFERENCE_KEYS = 100
+MAX_PREFERENCE_KEY_CHARS = 64
+MAX_PREFERENCE_VALUE_CHARS = 500
 
 # How often the temp-file sweep runs. Well under the TTL so nothing is much
 # overdue, and cheap enough to be invisible on an idle machine.
@@ -79,13 +81,24 @@ async def lifespan(app: FastAPI):
     for warning in report["warnings"]:  # type: ignore[union-attr]
         print(f"  map warning: {warning}")
 
-    db.init()
-    prompts.seed_defaults()
-    styles.seed_defaults()
-    print(f"  device:   {config.device_name()}")
-    for model in models.describe():
-        state = "ready" if model["available"] else "not downloaded"
-        print(f"  model:    {model['key']} — {state}")
+    # Everything below needs an extra. A base install serves the font converter
+    # and says plainly what else is missing — see `_mount`.
+    try:
+        from backend import db, models
+        from backend.features import prompts, styles
+
+        db.init()
+        prompts.seed_defaults()
+        styles.seed_defaults()
+        print(f"  device:   {config.device_name()}")
+        for model in models.describe():
+            state = "ready" if model["available"] else "not downloaded"
+            print(f"  model:    {model['key']} — {state}")
+    except ImportError as exc:
+        print(f"  base install: {exc.name} missing — font converter only")
+
+    for name, why in _missing_features.items():
+        print(f"  feature:  {name} — {why}")
 
     # SECURITY.md: client artwork must not accumulate between sessions.
     if config.WORK_DIR.exists():
@@ -109,11 +122,73 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Focus Toolkit", version="0.1.0", lifespan=lifespan)
-app.include_router(images_api.router)
-app.include_router(excel_api.router)
-app.include_router(posters_api.router)
-app.include_router(styles_api.router)
-app.include_router(ai_api.router)
+
+# The 127.0.0.1 bind stops the shop Wi-Fi. It does nothing about a page already
+# open in the operator's own browser: a multipart POST is a CORS simple request,
+# so any site could fire one at this port and make it spend money or burn the
+# CPU. See backend/guard.py and SECURITY.md §1.
+app.add_middleware(guard.LocalOnlyMiddleware, port=config.PORT)
+
+
+# --- feature routers ------------------------------------------------------
+#
+# Mounted one at a time, and a missing dependency disables that feature rather
+# than the whole app.
+#
+# `pyproject.toml` says the extras exist "so the font converter never pulls down
+# 3.5 GB". That claim did not hold: this module imported every router at the top,
+# so `api.images` → `features.images` → numpy and Pillow, `api.excel` → openpyxl,
+# and `db` → `crypto` → cryptography were all required before the server would
+# start at all (NEXT.md 2.6). On a 112 GB SSD that is exactly the cost the extras
+# were meant to avoid.
+#
+# Feature 1 — the font converter, which is the one the shop uses every day — now
+# genuinely runs on the base install.
+
+# Which extra provides each feature, for the message the operator sees.
+FEATURE_EXTRAS: dict[str, str] = {
+    "images": "images",
+    "excel": "translate",
+    "posters": "images",
+    "styles": "images",
+    "ai": "ai",
+}
+
+_missing_features: dict[str, str] = {}
+
+
+def _mount(name: str) -> None:
+    """Import and mount one feature router, or record why it is unavailable."""
+    try:
+        module = import_module(f"backend.api.{name}")
+    except ImportError as exc:
+        extra = FEATURE_EXTRAS.get(name, name)
+        _missing_features[name] = (
+            f"not installed — run `uv sync --extra {extra}` ({exc.name} is missing)"
+        )
+        return
+    app.include_router(module.router)
+
+
+for _feature in ("images", "excel", "posters", "styles", "ai"):
+    _mount(_feature)
+
+
+@app.get("/api/features")
+def features() -> dict[str, object]:
+    """Which features this install can actually serve.
+
+    So the UI can say "run `uv sync --extra images`" instead of showing a screen
+    whose every button 404s.
+    """
+    return {
+        "available": [
+            name
+            for name in ("fonts", "images", "excel", "posters", "styles", "ai")
+            if name == "fonts" or name not in _missing_features
+        ],
+        "unavailable": _missing_features,
+    }
 
 
 class ConvertRequest(BaseModel):
@@ -159,16 +234,61 @@ def fonts_info() -> dict[str, object]:
     return fonts.map_report()
 
 
+class PreferencesIn(BaseModel):
+    """A preferences write.
+
+    CLAUDE.md and SECURITY.md §4 both require a Pydantic body on every route;
+    this one took a bare `dict[str, str]` (NEXT.md 3.14). `set_preferences` did
+    already refuse unknown keys, so this was a convention break rather than a
+    hole — but the bounds below are new, and a preference value long enough to
+    matter had nothing stopping it before.
+    """
+
+    updates: dict[str, str] = Field(max_length=MAX_PREFERENCE_KEYS)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_a_bare_map(cls, data: object) -> object:
+        """Take `{"theme": "dark"}` as well as `{"updates": {"theme": "dark"}}`.
+
+        The UI has always sent the bare form. Wrapping it would be a nicer shape
+        and is not worth a breaking change to a route the operator's browser
+        calls on every settings edit — including from a `dist` bundle that may be
+        older than this server.
+        """
+        if isinstance(data, dict) and "updates" not in data:
+            return {"updates": data}
+        return data
+
+    @field_validator("updates")
+    @classmethod
+    def _bounded(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, item in value.items():
+            if len(key) > MAX_PREFERENCE_KEY_CHARS:
+                raise ValueError(f"preference name too long: {key[:40]}…")
+            if len(item) > MAX_PREFERENCE_VALUE_CHARS:
+                raise ValueError(f"value for {key} is too long")
+        return value
+
+
 @app.get("/api/settings/preferences")
 def get_preferences() -> dict[str, object]:
+    from backend import db
+
     return db.get_preferences()
 
 
 @app.put("/api/settings/preferences")
-def put_preferences(updates: dict[str, str]) -> dict[str, object]:
-    """Write preferences. Unknown keys are refused, never silently stored."""
+def put_preferences(body: PreferencesIn) -> dict[str, object]:
+    """Write preferences. Unknown keys are refused, never silently stored.
+
+    Accepts either `{"updates": {...}}` or the bare `{...}` the UI has always
+    sent.
+    """
+    from backend import db
+
     try:
-        return db.set_preferences(updates)
+        return db.set_preferences(body.updates)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

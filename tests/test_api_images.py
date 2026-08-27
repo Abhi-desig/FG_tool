@@ -14,7 +14,10 @@ from backend import config, jobs, main, models
 from backend.features import images
 from backend.main import app
 
-client = TestClient(app)
+# base_url is a loopback address deliberately: `guard.LocalOnlyMiddleware`
+# refuses any Host that is not this machine, and TestClient's default
+# `http://testserver` is exactly the DNS-rebinding shape it exists to stop.
+client = TestClient(app, base_url="http://127.0.0.1:8000")
 
 
 def png(w: int = 200, h: int = 150) -> bytes:

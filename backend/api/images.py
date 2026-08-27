@@ -112,15 +112,37 @@ def inspect(
             images.estimate_seconds(facts.width, facts.height), 1
         ),
         "tiles": images.tile_count_for(facts.width, facts.height),
+        # Every option says whether it is actually possible. It used to offer a
+        # 4× enlargement of a 576 Mpx source — 96000×96000, 9.2 Gpx — quoting 62
+        # minutes and 62,500 tiles with no indication that it cannot be built or
+        # written at all (NEXT.md 2.1).
         "scale_options": [
-            {
-                "scale": option,
-                "width": images.target_for(option, (facts.width, facts.height), None)[0],
-                "height": images.target_for(option, (facts.width, facts.height), None)[1],
-            }
+            _scale_option(option, facts)
             for option in ("2x", "4x")
         ],
         "device": config.device_name(),
+    }
+
+
+def _scale_option(option: str, facts: images.ImageFacts) -> dict[str, object]:
+    width, height = images.target_for(option, (facts.width, facts.height), None)
+    pixels = width * height
+    possible = pixels <= images.MAX_OUTPUT_PIXELS
+    return {
+        "scale": option,
+        "width": width,
+        "height": height,
+        "megapixels": round(pixels / 1_000_000, 1),
+        "possible": possible,
+        "why_not": (
+            None
+            if possible
+            else (
+                f"{width}×{height} is {pixels / 1_000_000:.0f} MP — past the "
+                f"{images.MAX_OUTPUT_PIXELS // 1_000_000} MP that can be "
+                f"assembled and written as one file."
+            )
+        ),
     }
 
 

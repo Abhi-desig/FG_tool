@@ -41,10 +41,32 @@ from backend.jobs import Reporter
 
 log = logging.getLogger(__name__)
 
-# Any real photograph, scan or camera file is accepted. This is set high enough
-# that it stops only an actual decompression bomb (SECURITY.md), not the 100+ MP
-# scans a print shop legitimately handles.
-Image.MAX_IMAGE_PIXELS = 1_000_000_000
+# --- input limits ---------------------------------------------------------
+#
+# SECURITY.md §4 requires a cap on pixel *dimensions*, and there was none. The
+# only guard was `MAX_IMAGE_PIXELS` at 1 Gpx — eleven times Pillow's own default
+# — and a 1 GB byte cap that a bomb sails under: a 546 KB PNG at 24000×24000
+# (576 Mpx) was accepted, and the response then offered a 4× upscale to
+# 96000×96000, quoting 62 minutes and 62,500 tiles with no hint that it is
+# impossible (NEXT.md 2.1).
+#
+# At the old 1 Gpx ceiling an RGBA decode is about 4 GB on a 12 GB machine.
+
+# The largest source this shop actually produces. A 6×4 ft banner at 300 DPI is
+# 21600×14400 — 311 Mpx — and nothing legitimate here goes past that; a 150 Mpx
+# ceiling still comfortably covers the 100+ MP flatbed scans, a 60 MP camera
+# file, and any photograph a client will ever send.
+MAX_INPUT_PIXELS = 150_000_000
+
+# And a cap on either side on its own, so a pathological 1×200,000,000 strip is
+# refused too — it passes a pixel-count test and still breaks everything
+# downstream.
+MAX_INPUT_SIDE = 30_000
+
+# Pillow's own bomb guard. Kept just above our own limit so `load` refuses with
+# a sentence the operator can act on, rather than Pillow raising first with one
+# they cannot.
+Image.MAX_IMAGE_PIXELS = MAX_INPUT_PIXELS + 1_000_000
 
 # The model's static geometry. Not tunable — it is baked into the graph.
 TILE = 128
@@ -103,13 +125,46 @@ def load(data: bytes) -> Image.Image:
             f"Use {', '.join(sorted(ALLOWED_FORMATS))}."
         )
 
+    # Check the size from the *header*, before decoding. This is the whole point:
+    # a decompression bomb is small on disk and enormous in memory, so the byte
+    # cap never sees it and by the time `load()` has run the damage is done.
+    _check_dimensions(probe.size)
+
     # verify() leaves the image unusable, so reopen for real work.
     try:
         image = Image.open(io.BytesIO(data))
         image.load()
+    except Image.DecompressionBombError as exc:
+        raise ImageError(
+            "That image is too large to open safely — it decodes to far more "
+            "pixels than its file size suggests."
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         raise ImageError("That image could not be decoded.") from exc
     return image
+
+
+def _check_dimensions(size: tuple[int, int]) -> None:
+    """Refuse an image too big to handle, in words the operator can act on."""
+    width, height = size
+    if width <= 0 or height <= 0:
+        raise ImageError("That image reports no size at all.")
+
+    if width > MAX_INPUT_SIDE or height > MAX_INPUT_SIDE:
+        raise ImageError(
+            f"That image is {width}×{height} pixels. The longest side this tool "
+            f"accepts is {MAX_INPUT_SIDE:,} pixels — far more than a 6×4 ft "
+            f"banner needs at 300 DPI. Export a smaller version first."
+        )
+
+    pixels = width * height
+    if pixels > MAX_INPUT_PIXELS:
+        raise ImageError(
+            f"That image is {width}×{height} — {pixels / 1_000_000:.0f} "
+            f"megapixels. The limit is {MAX_INPUT_PIXELS // 1_000_000} MP, which "
+            f"is already larger than anything a print job needs. Export a "
+            f"smaller version first."
+        )
 
 
 def facts(image: Image.Image) -> ImageFacts:

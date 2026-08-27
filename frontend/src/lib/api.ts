@@ -131,6 +131,10 @@ export interface ScaleOption {
   scale: UpscaleScale
   width: number
   height: number
+  megapixels: number
+  /** False when the output could not be assembled or written as one file. */
+  possible: boolean
+  why_not: string | null
 }
 
 export interface Inspection {
