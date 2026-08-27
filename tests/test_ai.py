@@ -645,3 +645,34 @@ def test_friendly_error_is_the_public_name() -> None:
     assert ai.friendly_error(RuntimeError("deadline exceeded")) == ai._friendly(  # noqa: SLF001
         RuntimeError("deadline exceeded")
     )
+
+
+def test_a_styling_hint_never_becomes_text_on_the_poster() -> None:
+    """`tone` is "festive", not a line of copy.
+
+    The first version of the dropped-block repair re-inserted every non-empty
+    input value, which would have printed the word "festive" on a client's
+    poster. Caught by running the shipped self-check, not by the test suite —
+    hence this test.
+    """
+    values = {
+        "headline": "ONAM SALE",
+        "offer": "40% OFF",
+        "phone": "9876543210",
+        "occasion": "Onam",
+        "tone": "festive",
+    }
+    layout = {"blocks": [{"id": "headline", "text": "ONAM SALE"}]}
+
+    fixed, _ = ai.verify_text_unchanged(layout, values)
+    ids = {b["id"] for b in fixed["blocks"]}
+    assert "tone" not in ids, "a styling hint became a text block"
+    assert ids == {"headline", "offer", "phone", "occasion"}
+
+
+def test_only_known_copy_roles_can_be_re_inserted() -> None:
+    """An unexpected key in the values dict must not reach the poster either."""
+    fixed, _ = ai.verify_text_unchanged(
+        {"blocks": []}, {"headline": "SALE", "internal_note": "do not print"}
+    )
+    assert [b["id"] for b in fixed["blocks"]] == ["headline"]

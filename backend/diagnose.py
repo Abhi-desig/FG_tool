@@ -139,9 +139,23 @@ def _check_machinery() -> list[tuple[bool, str]]:
             }
         )
         blocks = (lay.layout or {}).get("blocks", [])
+        ids = [b.get("id") for b in blocks]
         phone = next((b for b in blocks if b.get("id") == "phone"), {})
+        # The stub returns three blocks and omits `occasion`, which the repair
+        # puts back — so four. `tone` is a styling hint, not copy, and must never
+        # become text on the poster: an early version of that repair would have
+        # printed the word "festive" on a client's poster.
         results.append(
-            (lay.ok and len(blocks) == 3, f"layout: {len(blocks)} blocks parsed")
+            (
+                lay.ok and sorted(ids) == ["headline", "occasion", "offer", "phone"],
+                f"layout: {len(blocks)} blocks — {', '.join(str(i) for i in sorted(ids))}",
+            )
+        )
+        results.append(
+            (
+                "occasion" in ids,
+                "dropped line restored: the AI omitted 'occasion', it is back",
+            )
         )
         results.append(
             (
@@ -192,7 +206,7 @@ def _check_key(key: str | None) -> tuple[bool, str]:
     try:
         models = ai.available_models()
     except Exception as exc:  # noqa: BLE001 - report, never raise past here
-        return False, ai._friendly(exc)  # noqa: SLF001
+        return False, ai.friendly_error(exc)
     names = ", ".join(m["name"] for m in models[:6])
     return True, f"Google accepted the key and offers {len(models)} models ({names}…)"
 

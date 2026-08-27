@@ -828,6 +828,12 @@ def plan_layout(values: dict[str, str], over_budget_ok: bool = False) -> AiResul
 # Where a re-inserted block goes when the model dropped it entirely. Matches the
 # designer's own opening layout, so a recovered line lands somewhere sensible
 # rather than on top of another one.
+#
+# **This is also the list of fields that may become text on the poster**, and
+# that is load-bearing. `plan_layout` is given `tone` too — a styling hint like
+# "festive" — and a first version of the dropped-block repair re-inserted every
+# non-empty input value, which would have printed the word "festive" on a
+# client's poster. Caught by running the shipped self-check.
 _FALLBACK_PLACEMENT: dict[str, dict[str, Any]] = {
     "occasion": {"y": 0.10, "size": "medium"},
     "headline": {"y": 0.22, "size": "large"},
@@ -857,9 +863,9 @@ def verify_text_unchanged(
         # No usable blocks at all: rebuild from what was typed rather than
         # handing back a layout with none of the operator's words in it.
         rebuilt = [
-            {"id": key, "text": text.strip(), **_FALLBACK_PLACEMENT.get(key, {"y": 0.5})}
-            for key, text in values.items()
-            if text and text.strip()
+            {"id": key, "text": values[key].strip(), **placement}
+            for key, placement in _FALLBACK_PLACEMENT.items()
+            if values.get(key, "").strip()
         ]
         if rebuilt:
             notes.append(
@@ -885,13 +891,16 @@ def verify_text_unchanged(
     # Anything the model never returned. Re-inserted rather than lost: losing a
     # line of the client's wording is exactly the invisible error this shop
     # cannot afford, and it is the one this function exists to stop.
+    #
+    # Only the copy roles in `_FALLBACK_PLACEMENT` are eligible — see the note
+    # there. A field that is not poster copy must never become text on a poster.
     returned = {
         str(b.get("id", "")) for b in blocks if isinstance(b, dict)
     }
-    for key, text in values.items():
+    for key, placement in _FALLBACK_PLACEMENT.items():
+        text = values.get(key, "")
         if not text or not text.strip() or key in returned:
             continue
-        placement = _FALLBACK_PLACEMENT.get(key, {"y": 0.5, "size": "medium"})
         blocks.append({"id": key, "text": text.strip(), **placement})
         notes.append(
             f"The AI left out the {key} line — it was added back at the standard "
