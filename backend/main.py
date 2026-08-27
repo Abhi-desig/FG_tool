@@ -203,6 +203,9 @@ class ConvertResponse(BaseModel):
     font: str
     chars_in: int
     chars_out: int
+    # Characters the print font has no glyph for — chiefly emoji, which arrive
+    # constantly because WhatsApp is the primary input (NEXT.md 3.4).
+    unconvertible: list[dict[str, object]] = Field(default_factory=list)
 
 
 @app.post("/api/fonts/convert", response_model=ConvertResponse)
@@ -219,8 +222,17 @@ def convert(req: ConvertRequest) -> ConvertResponse:
     except fonts.MapError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Only meaningful going into the print font; the other direction is
+    # producing Unicode, which can represent anything.
+    problems = (
+        fonts.unconvertible(req.text, req.font)
+        if req.direction == "to_ascii"
+        else []
+    )
+
     return ConvertResponse(
         result=result,
+        unconvertible=problems,
         direction=req.direction,
         font=req.font,
         chars_in=len(req.text),

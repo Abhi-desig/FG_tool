@@ -486,6 +486,17 @@ def encode(
 
     DPI is written into the file so CorelDRAW and the RIP place it at the right
     physical size instead of guessing.
+
+    **PNG cannot store 300 DPI exactly, and that is not a bug.** Its `pHYs` chunk
+    holds pixels per *metre* as an integer: 300 DPI is 11811.024 px/m, so the
+    nearest storable value reads back as 299.9994 DPI in CorelDRAW (NEXT.md
+    3.11). No integer gives exactly 300, so the choice is between that and a
+    worse approximation. A 6 ft banner placed from this file is off by about
+    0.4 thousandths of an inch — a hundredth of the width of a hair — which is
+    below anything a large-format printer can resolve.
+
+    TIFF stores resolution as a rational and *is* exact, which is one more reason
+    the CMYK print path uses it.
     """
     fmt = fmt.upper()
     out = image

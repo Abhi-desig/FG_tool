@@ -31,6 +31,13 @@ os.environ.setdefault("REMBG_HOME", str(MODELS_DIR))
 
 # Same for Hugging Face (the translation models). Default is ~/.cache, which on
 # the shop PC is the small SSD.
+#
+# Note that this directory is not only ours: `HF_HOME` is a well-known variable,
+# so anything else on the machine that uses the Hugging Face libraries writes
+# here too, and a stray `.agent_harnesses.json` from another tool has already
+# turned up (NEXT.md 3.18). Harmless, but do not treat `models/hf/` as "only
+# weights" — never wipe it wholesale, and check what a file is before deleting
+# it. The weights themselves live under `models/hf/hub`.
 HF_HOME = Path(os.getenv("HF_HOME", MODELS_DIR / "hf")).expanduser()
 os.environ.setdefault("HF_HOME", str(HF_HOME))
 

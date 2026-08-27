@@ -1,8 +1,14 @@
 """SQLite storage. Stdlib `sqlite3`, no ORM — see ADR-009.
 
-Phase 2 uses the `preferences` table only. The rest of the schema in
-SETTINGS.md (clients, glossary, prompts, api_keys, jobs) arrives with the phase
-that needs it; creating empty tables early would just be clutter.
+The full schema is here — `preferences`, `clients`, `glossary`, `api_keys`,
+`prompts`, `prompt_versions`, `poster_styles` and `ai_spend`. The tables are
+created together in `init()` rather than per phase: an empty table costs nothing,
+and the alternative was a migration step on a machine with no one to run it.
+
+API keys are stored encrypted; `crypto` owns that and this module never handles
+a plaintext key except to hand it straight to `crypto.encrypt`.
+
+Schema reference and the meaning of each preference key: SETTINGS.md.
 """
 
 from __future__ import annotations

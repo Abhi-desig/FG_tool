@@ -6,7 +6,12 @@ import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { ApiError, convert, type Direction } from "@/lib/api"
+import {
+  ApiError,
+  convert,
+  type Direction,
+  type UnconvertibleChar,
+} from "@/lib/api"
 import { canAutoCopy, copyText } from "@/lib/clipboard"
 
 const SAMPLE = "കേരളം"
@@ -24,6 +29,15 @@ export function FontConverter() {
   const [output, setOutput] = useState("")
   const [direction, setDirection] = useState<Direction>("to_ascii")
   const [error, setError] = useState<string | null>(null)
+  /**
+   * Characters the print font has no glyph for.
+   *
+   * WhatsApp is the primary input here, so emoji arrive constantly. They passed
+   * straight through unflagged, and the helper text below — "This looks like
+   * gibberish here — that is correct" — trained the operator to ignore exactly
+   * this (NEXT.md 3.4). In CorelDRAW a 🎉 lands as a box, on a client's poster.
+   */
+  const [unconvertible, setUnconvertible] = useState<UnconvertibleChar[]>([])
   const [busy, setBusy] = useState(false)
   // Whether the browser lets us copy without a click. Decides what we promise.
   const [autoCopy, setAutoCopy] = useState(false)
@@ -60,6 +74,7 @@ export function FontConverter() {
   useEffect(() => {
     if (!input) {
       setOutput("")
+      setUnconvertible([])
       setError(null)
       return
     }
@@ -70,6 +85,7 @@ export function FontConverter() {
       convert(input, direction, controller.signal)
         .then((res) => {
           setOutput(res.result)
+          setUnconvertible(res.unconvertible ?? [])
           setError(null)
           if (copyWhenReady.current) {
             copyWhenReady.current = false
@@ -83,6 +99,7 @@ export function FontConverter() {
           if (controller.signal.aborted) return
           setError(err instanceof ApiError ? err.message : "Conversion failed.")
           setOutput("")
+          setUnconvertible([])
         })
         .finally(() => {
           if (!controller.signal.aborted) setBusy(false)
@@ -176,10 +193,37 @@ export function FontConverter() {
               toAscii ? "glyphs" : "malayalam"
             }`}
           />
+          {/*
+            Before the "that is correct" reassurance, deliberately. That sentence
+            is right about the Malayalam and wrong about everything else, and on
+            its own it teaches the operator to ignore a real problem.
+          */}
+          {toAscii && unconvertible.length > 0 && (
+            <div
+              role="alert"
+              className="rounded-lg border border-[color:var(--warn)]/50 bg-[color:var(--warn)]/10 p-3 text-xs"
+            >
+              <p className="font-medium">
+                {unconvertible.length === 1
+                  ? "One character will not print."
+                  : `${unconvertible.length} characters will not print.`}
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                ML-TTKarthika has no glyph for{" "}
+                {unconvertible
+                  .map((c) => `${c.character}${c.count > 1 ? ` ×${c.count}` : ""}`)
+                  .join("  ")}
+                . In CorelDRAW {unconvertible.length === 1 ? "it" : "they"} will
+                come out as a box or the wrong letter — remove{" "}
+                {unconvertible.length === 1 ? "it" : "them"} from the text above.
+              </p>
+            </div>
+          )}
           {toAscii ? (
             <p className="text-xs text-muted-foreground">
-              This looks like gibberish here — that is correct. It reads as Malayalam once
-              set in ML-TTKarthika.
+              The Malayalam looks like gibberish here — that is correct, and it reads
+              properly once set in ML-TTKarthika. Anything flagged above is a
+              different matter.
             </p>
           ) : (
             <p className="text-xs text-muted-foreground">Readable Malayalam text.</p>

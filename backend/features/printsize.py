@@ -213,6 +213,14 @@ def assess(
         )
         upscale_to = _upscale_target(target_w_in, target_h_in, cls.good_dpi)
 
+    # `crop_fraction` was computed and returned but never said out loud, so the
+    # operator was not told that most of the picture would be thrown away
+    # (NEXT.md 3.7). That is a bigger surprise on a delivered print than a DPI
+    # figure, and it is the one thing here the client will notice immediately.
+    crop_note = _crop_note(cropped, pixels_w / pixels_h, target_w_in / target_h_in)
+    if crop_note:
+        detail = f"{detail} {crop_note}"
+
     return Assessment(
         verdict=verdict,
         headline=headline,
@@ -265,6 +273,39 @@ def best_use_for(
     return rows
 
 
+# Below this, cropping is a trim the client will not notice. Above it, the
+# picture is being changed and the operator must know before it prints.
+CROP_WORTH_SAYING = 0.08
+
+
+def _crop_note(
+    cropped: float, image_aspect: float, target_aspect: float
+) -> str | None:
+    """Say how much of the picture the shape change costs, and which way."""
+    if cropped < CROP_WORTH_SAYING:
+        return None
+    percent = round(cropped * 100)
+    # Which edges go: a wide picture on a tall page loses its sides.
+    lost = "sides" if image_aspect > target_aspect else "top and bottom"
+    severity = (
+        "Most of the picture would be lost"
+        if cropped >= 0.5
+        else "A noticeable part of the picture would be lost"
+    )
+    return (
+        f"{severity} — the image is a different shape from this size, so about "
+        f"{percent}% of it gets cropped off the {lost}. Change the size, or "
+        f"crop it deliberately first."
+    )
+
+
 def _trim(value: float) -> str:
-    """Format a number without a pointless trailing .0."""
-    return f"{value:g}"
+    """Format a number without a pointless trailing .0.
+
+    Rounded to two decimals first. `:g` alone printed `2×1.33333 feet` in the
+    verdict prose while the tile beside it — built from `round(…, 2)` — said
+    `2×1.33 feet`: the same number in two formats on one screen (NEXT.md 3.1).
+    Two decimals is also the honest precision here, since none of this is
+    accurate to a thousandth of a foot.
+    """
+    return f"{round(value, 2):g}"

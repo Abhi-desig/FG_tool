@@ -302,6 +302,69 @@ def _longest(
     return None
 
 
+# --- what will not survive the conversion ---------------------------------
+#
+# WhatsApp is the primary input to this screen, so emoji arrive constantly. They
+# pass straight through: `unicode_to_ascii` treats anything unmapped as
+# pass-through, which is right for Latin text and digits and wrong for a 🎉 that
+# an 8-bit print font has no glyph for. Nothing said so, and the helper text —
+# *"This looks like gibberish here — that is correct"* — actively trains the
+# operator to ignore exactly this (NEXT.md 3.4). In CorelDRAW it lands as a box
+# or a random letter, and it lands on a client's poster.
+#
+# Unicode categories that legitimately pass through an ML-TTKarthika conversion.
+_PASS_THROUGH_CATEGORIES = frozenset(
+    {
+        "Lu", "Ll", "Lt",   # Latin letters
+        "Nd", "Nl", "No",   # digits
+        "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po",  # punctuation
+        "Zs", "Zl", "Zp",   # whitespace
+        "Cc",               # newlines and tabs
+        "Sc",               # ₹ and other currency marks
+    }
+)
+
+
+def unconvertible(text: str, font: str = DEFAULT_FONT) -> list[dict[str, object]]:
+    """Characters that will not come out of the print font as themselves.
+
+    Reported so the operator can delete them before the text reaches CorelDRAW,
+    rather than discovering a tofu box on a proof. Each entry is one distinct
+    character with a count, because a message with nine 🎉 is one problem.
+    """
+    if not text:
+        return []
+
+    u2a, _, _ = load_map(font)
+    lengths = _match_lengths(frozenset(u2a))
+    normalised = _normalise(text)
+
+    found: dict[str, int] = {}
+    i, n = 0, len(normalised)
+    while i < n:
+        seq = _longest(normalised, i, u2a, lengths)
+        if seq is not None:
+            i += len(seq)
+            continue
+        character = normalised[i]
+        i += 1
+        if unicodedata.category(character) in _PASS_THROUGH_CATEGORIES:
+            continue
+        if character.isascii():
+            continue
+        found[character] = found.get(character, 0) + 1
+
+    return [
+        {
+            "character": character,
+            "count": count,
+            "name": unicodedata.name(character, "unnamed character"),
+            "codepoint": f"U+{ord(character):04X}",
+        }
+        for character, count in found.items()
+    ]
+
+
 def map_report(font: str = DEFAULT_FONT) -> dict[str, object]:
     """Diagnostics for the settings screen and for debugging a bad conversion."""
     u2a, a2u, warnings = load_map(font)

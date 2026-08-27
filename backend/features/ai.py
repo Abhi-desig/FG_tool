@@ -358,7 +358,46 @@ def _friendly(exc: Exception) -> str:
         return "The request timed out. Your work is unchanged — try again."
     if "connect" in lowered or "network" in lowered or "dns" in lowered:
         return "Could not reach Google. Check the internet connection."
-    return f"The request failed: {text[:200]}"
+    return f"The request failed: {_redact(text)[:200]}"
+
+
+# Anything key-shaped. Both Gemini formats, plus a bearer token and a generic
+# long opaque credential, since the SDK's exception text is not ours to predict.
+_SECRET_SHAPES = re.compile(
+    r"""
+      AQ\.[A-Za-z0-9_\-]{8,}          # current Gemini auth key
+    | AIza[A-Za-z0-9_\-]{10,}         # old-style standard key
+    | ya29\.[A-Za-z0-9_\-.]{10,}      # OAuth access token
+    | (?i:bearer)\s+[A-Za-z0-9_\-.=]{12,}
+    | (?i:(?:api[_-]?key|key|token|authorization)["'\s:=]+)[A-Za-z0-9_\-.=]{12,}
+    """,
+    re.VERBOSE,
+)
+
+
+def _redact(text: str) -> str:
+    """Strip anything key-shaped out of an SDK exception before it is shown.
+
+    `_friendly`'s fallback echoes the raw exception to the UI, which made it the
+    one path in the app where a credential could reach the screen — against
+    SECURITY.md §2, which says a key is never logged and never in an error
+    message (NEXT.md 3.17).
+
+    The SDK usually does not include the key. "Usually" is not the standard for
+    the only thing here with direct monetary value, and Google is free to change
+    its error text whenever it likes.
+    """
+    return _SECRET_SHAPES.sub("[redacted]", text)
+
+
+def friendly_error(exc: Exception) -> str:
+    """Turn an SDK exception into something the operator can act on.
+
+    The public name. `api/ai.py` reached across the module boundary for
+    `_friendly` twice (NEXT.md 3.16); this is the same function without the
+    `noqa: SLF001` at each call site.
+    """
+    return _friendly(exc)
 
 
 def _record(result: AiResult) -> AiResult:

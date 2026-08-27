@@ -6,12 +6,22 @@
 
 export type Direction = "to_ascii" | "to_unicode"
 
+/** One character the print font has no glyph for. See features/fonts.py. */
+export interface UnconvertibleChar {
+  character: string
+  count: number
+  name: string
+  codepoint: string
+}
+
 export interface ConvertResult {
   result: string
   direction: Direction
   font: string
   chars_in: number
   chars_out: number
+  /** Chiefly emoji — WhatsApp is the primary input to this screen. */
+  unconvertible: UnconvertibleChar[]
 }
 
 export interface FontInfo {
@@ -381,8 +391,26 @@ export interface EngineRow {
   default: boolean
 }
 
-export function listClients(): Promise<ClientRow[]> {
-  return request<ClientRow[]>("/api/clients")
+/**
+ * Unwrap a list route that may answer either shape.
+ *
+ * The client and glossary routes returned bare lists while every other route in
+ * the app used a wrapped envelope, and they now return `{clients: [...]}` /
+ * `{terms: [...]}` (NEXT.md 3.12). This keeps working against either, so a
+ * `dist` bundle and a server from different commits do not break the settings
+ * screen — the shop PC has exactly that risk.
+ */
+function unwrap<T>(body: unknown, key: string): T[] {
+  if (Array.isArray(body)) return body as T[]
+  if (body && typeof body === "object" && key in body) {
+    const inner = (body as Record<string, unknown>)[key]
+    if (Array.isArray(inner)) return inner as T[]
+  }
+  return []
+}
+
+export async function listClients(): Promise<ClientRow[]> {
+  return unwrap<ClientRow>(await request<unknown>("/api/clients"), "clients")
 }
 
 export function addClient(name: string): Promise<ClientRow> {
@@ -392,24 +420,36 @@ export function addClient(name: string): Promise<ClientRow> {
   })
 }
 
-export function getGlossary(clientId: number): Promise<GlossaryTerm[]> {
-  return request<GlossaryTerm[]>(`/api/clients/${clientId}/glossary`)
+export async function getGlossary(clientId: number): Promise<GlossaryTerm[]> {
+  return unwrap<GlossaryTerm>(
+    await request<unknown>(`/api/clients/${clientId}/glossary`),
+    "terms",
+  )
 }
 
-export function putGlossary(
+export async function putGlossary(
   clientId: number,
   terms: GlossaryTerm[],
 ): Promise<GlossaryTerm[]> {
-  return request<GlossaryTerm[]>(`/api/clients/${clientId}/glossary`, {
-    method: "PUT",
-    body: JSON.stringify(terms),
-  })
+  return unwrap<GlossaryTerm>(
+    await request<unknown>(`/api/clients/${clientId}/glossary`, {
+      method: "PUT",
+      body: JSON.stringify({ terms }),
+    }),
+    "terms",
+  )
 }
 
-export function deleteTerm(clientId: number, termId: number): Promise<GlossaryTerm[]> {
-  return request<GlossaryTerm[]>(`/api/clients/${clientId}/glossary/${termId}`, {
-    method: "DELETE",
-  })
+export async function deleteTerm(
+  clientId: number,
+  termId: number,
+): Promise<GlossaryTerm[]> {
+  return unwrap<GlossaryTerm>(
+    await request<unknown>(`/api/clients/${clientId}/glossary/${termId}`, {
+      method: "DELETE",
+    }),
+    "terms",
+  )
 }
 
 export function inspectSheet(file: File): Promise<SheetInfo> {

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from backend.features import printsize
 from backend.features.printsize import (
     ARCMINUTE_CONSTANT,
     BY_KEY,
@@ -257,3 +258,59 @@ def test_assessment_is_immutable() -> None:
     assert isinstance(result, Assessment)
     with pytest.raises((AttributeError, TypeError)):
         result.verdict = Verdict.GOOD  # type: ignore[misc]
+
+
+# --- one number, one format (NEXT.md 3.1) --------------------------------
+
+
+def test_the_prose_and_the_tile_agree_on_the_size() -> None:
+    """`2×1.33333 feet` in the verdict beside `2×1.33 feet` in the tile.
+
+    The same number in two formats on one screen, which reads as two different
+    numbers to anyone not looking for it.
+    """
+    result = printsize.assess(4000, 2667, 2, 1.33333, "feet", "poster")
+    assert "1.33333" not in result.headline
+    assert "1.33" in result.headline
+    # And the tile the operator reads next to it.
+    assert result.max_w == round(result.max_w, 2)
+
+
+def test_trim_still_drops_a_pointless_decimal() -> None:
+    assert printsize._trim(6.0) == "6"  # noqa: SLF001
+    assert printsize._trim(1.3333333) == "1.33"  # noqa: SLF001
+    assert printsize._trim(0.5) == "0.5"  # noqa: SLF001
+
+
+# --- say how much of the picture is lost (NEXT.md 3.7) -------------------
+
+
+def test_heavy_cropping_is_stated_in_the_prose() -> None:
+    """`crop_fraction: 0.8` was computed, returned, and never said out loud.
+
+    The operator was not told that 80% of the picture would be cropped — a bigger
+    surprise on a delivered print than any DPI figure.
+    """
+    result = printsize.assess(6000, 1000, 4, 4, "feet", "flex")
+    assert result.crop_fraction > 0.5
+    assert "cropped" in result.detail
+    assert "%" in result.detail
+    # And which edges go, because that decides whether it matters.
+    assert "sides" in result.detail
+
+
+def test_a_tall_image_on_a_wide_page_loses_top_and_bottom() -> None:
+    result = printsize.assess(1000, 6000, 6, 4, "feet", "flex")
+    assert "top and bottom" in result.detail
+
+
+def test_a_matching_aspect_ratio_says_nothing_about_cropping() -> None:
+    """No false alarm — the note must only appear when there is something to say."""
+    result = printsize.assess(4000, 2667, 6, 4, "feet", "flex")
+    assert result.crop_fraction < printsize.CROP_WORTH_SAYING
+    assert "cropped" not in result.detail
+
+
+def test_a_small_crop_is_not_worth_mentioning() -> None:
+    """A 3% trim is not news, and saying so every time devalues saying it ever."""
+    assert printsize._crop_note(0.03, 1.5, 1.55) is None  # noqa: SLF001

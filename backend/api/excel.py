@@ -12,7 +12,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from backend import config, db, jobs
 from backend.features import excel, glossary, translate
@@ -20,6 +20,9 @@ from backend.features import excel, glossary, translate
 router = APIRouter(prefix="/api", tags=["excel"])
 
 MAX_ROWS = 20_000
+
+# A glossary this long is a data-entry accident, not a client's terminology.
+MAX_TERMS = 2_000
 
 
 def _read(upload: UploadFile) -> bytes:
@@ -44,9 +47,22 @@ class TermIn(BaseModel):
     notes: str = ""
 
 
+# --- envelope convention --------------------------------------------------
+#
+# Every other route in this app answers with a wrapped object. These five
+# returned bare lists, and `PUT /glossary` took one (NEXT.md 3.12) — which also
+# meant there was nowhere to add a field without a breaking change.
+#
+# Both shapes are served: the response is wrapped, and the request accepts a bare
+# list as well as a wrapped one. The shipped `frontend/dist` on the shop PC may
+# be older than this server, and a settings screen that stops working is not a
+# fair price for tidiness.
+
+
 @router.get("/clients")
-def list_clients(include_archived: bool = False) -> list[dict[str, object]]:
-    return db.list_clients(include_archived)
+def list_clients(include_archived: bool = False) -> dict[str, object]:
+    rows = db.list_clients(include_archived)
+    return {"clients": rows, "count": len(rows)}
 
 
 @router.post("/clients")
@@ -66,28 +82,50 @@ def archive_client(client_id: int, archived: bool = True) -> dict[str, object]:
 
 
 @router.get("/clients/{client_id}/glossary")
-def get_glossary(client_id: int) -> list[dict[str, object]]:
+def get_glossary(client_id: int) -> dict[str, object]:
     try:
-        return db.get_glossary(client_id)
+        rows = db.get_glossary(client_id)
     except db.NotFound as exc:
         raise HTTPException(404, str(exc)) from exc
+    return _glossary_envelope(client_id, rows)
+
+
+class GlossaryIn(BaseModel):
+    """A glossary write. Accepts `{"terms": [...]}` or a bare `[...]`."""
+
+    terms: list[TermIn] = Field(default_factory=list, max_length=MAX_TERMS)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_a_bare_list(cls, data: object) -> object:
+        if isinstance(data, list):
+            return {"terms": data}
+        return data
 
 
 @router.put("/clients/{client_id}/glossary")
-def put_glossary(client_id: int, terms: list[TermIn]) -> list[dict[str, object]]:
+def put_glossary(client_id: int, body: GlossaryIn) -> dict[str, object]:
     """Add or correct terms. Correcting one fixes every later occurrence."""
     try:
-        return db.upsert_terms(client_id, [t.model_dump() for t in terms])
+        rows = db.upsert_terms(client_id, [t.model_dump() for t in body.terms])
     except db.NotFound as exc:
         raise HTTPException(404, str(exc)) from exc
+    return _glossary_envelope(client_id, rows)
 
 
 @router.delete("/clients/{client_id}/glossary/{term_id}")
-def delete_term(client_id: int, term_id: int) -> list[dict[str, object]]:
+def delete_term(client_id: int, term_id: int) -> dict[str, object]:
     try:
-        return db.delete_term(client_id, term_id)
+        rows = db.delete_term(client_id, term_id)
     except db.NotFound as exc:
         raise HTTPException(404, str(exc)) from exc
+    return _glossary_envelope(client_id, rows)
+
+
+def _glossary_envelope(
+    client_id: int, rows: list[dict[str, object]]
+) -> dict[str, object]:
+    return {"client_id": client_id, "terms": rows, "count": len(rows)}
 
 
 # --- translation -----------------------------------------------------------

@@ -18,6 +18,7 @@ from backend.features.fonts import (
     ascii_to_unicode,
     load_map,
     map_report,
+    unconvertible,
     unicode_to_ascii,
 )
 
@@ -195,3 +196,51 @@ def test_au_sign_splits_around_the_consonant() -> None:
     assert ascii_to_unicode("sIu") == "കൌ"
     # The modern spelling is unaffected and stays post-base.
     assert unicode_to_ascii("കൗ") == "Iu"
+
+
+# --- what will not survive the print font (NEXT.md 3.4) ------------------
+#
+# WhatsApp is the primary input to this screen, so emoji arrive constantly. They
+# passed straight through unflagged, and the helper text — "This looks like
+# gibberish here — that is correct" — trained the operator to ignore exactly
+# this. In CorelDRAW a 🎉 lands as a box, on a client's poster.
+
+
+def test_emoji_are_flagged() -> None:
+    found = unconvertible("ഓണം ആശംസകൾ 🎉🎉")
+    assert len(found) == 1
+    assert found[0]["character"] == "🎉"
+    assert found[0]["count"] == 2, "a message with two of the same emoji is one problem"
+    assert found[0]["codepoint"] == "U+1F389"
+    # Named, so the operator can find it in a long message.
+    assert "POPPER" in str(found[0]["name"])
+
+
+def test_ordinary_shop_text_is_not_flagged() -> None:
+    """No false alarms: Latin, digits, punctuation and ₹ all pass through fine."""
+    assert unconvertible("ഓണം ആശംസകൾ — Focus Digitals, ₹500 (50% off) 9847012345") == []
+
+
+def test_pure_malayalam_is_not_flagged() -> None:
+    assert unconvertible("കേരളം ഗ്രാൻഡ് സെയിൽ") == []
+
+
+def test_another_script_is_flagged() -> None:
+    """A Hindi or Tamil word pasted in by mistake is the same class of problem."""
+    found = unconvertible("ഓണം नमस्ते")
+    assert found, "text the print font cannot represent was passed through silently"
+
+
+def test_an_arrow_is_flagged() -> None:
+    """Not only emoji. Any symbol the 8-bit font has no glyph for."""
+    assert [f["character"] for f in unconvertible("ഓണം → വിഷു")] == ["→"]
+
+
+def test_empty_text_is_not_a_problem() -> None:
+    assert unconvertible("") == []
+
+
+def test_the_flag_does_not_change_the_conversion() -> None:
+    """Reporting only. Silently dropping a character would be worse."""
+    text = "ഓണം 🎉"
+    assert "🎉" in unicode_to_ascii(text)

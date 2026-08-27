@@ -66,14 +66,33 @@ def a_client() -> int:
 # --- clients and glossary -------------------------------------------------
 
 
+def clients(include_archived: bool = False) -> list[dict]:
+    """Client rows out of the wrapped envelope.
+
+    These routes returned bare lists while every other route in the app used an
+    envelope (NEXT.md 3.12). Now `{"clients": [...], "count": n}`.
+    """
+    query = "?include_archived=true" if include_archived else ""
+    return client.get(f"/api/clients{query}").json()["clients"]
+
+
+def terms_of(client_id: int) -> list[dict]:
+    return client.get(f"/api/clients/{client_id}/glossary").json()["terms"]
+
+
 def test_client_lifecycle(a_client: int) -> None:
-    names = [c["id"] for c in client.get("/api/clients").json()]
-    assert a_client in names
+    assert a_client in [c["id"] for c in clients()]
     client.post(f"/api/clients/{a_client}/archive")
-    assert a_client not in [c["id"] for c in client.get("/api/clients").json()]
-    assert a_client in [
-        c["id"] for c in client.get("/api/clients?include_archived=true").json()
-    ]
+    assert a_client not in [c["id"] for c in clients()]
+    assert a_client in [c["id"] for c in clients(include_archived=True)]
+
+
+def test_client_list_is_wrapped_in_an_envelope() -> None:
+    """The convention every other route in this app already followed."""
+    body = client.get("/api/clients").json()
+    assert isinstance(body, dict)
+    assert isinstance(body["clients"], list)
+    assert body["count"] == len(body["clients"])
 
 
 def test_client_name_is_required() -> None:
@@ -81,14 +100,26 @@ def test_client_name_is_required() -> None:
 
 
 def test_glossary_round_trip(a_client: int) -> None:
-    rows = client.put(
+    body = client.put(
         f"/api/clients/{a_client}/glossary",
-        json=[{"source_term": "coconut oil", "target_term": "വെളിച്ചെണ്ണ"}],
+        json={"terms": [{"source_term": "coconut oil", "target_term": "വെളിച്ചെണ്ണ"}]},
     ).json()
-    assert rows[0]["target_term"] == "വെളിച്ചെണ്ണ"
+    assert body["terms"][0]["target_term"] == "വെളിച്ചെണ്ണ"
+    assert body["client_id"] == a_client
 
-    term_id = rows[0]["id"]
-    assert client.delete(f"/api/clients/{a_client}/glossary/{term_id}").json() == []
+    term_id = body["terms"][0]["id"]
+    after = client.delete(f"/api/clients/{a_client}/glossary/{term_id}").json()
+    assert after["terms"] == []
+    assert after["count"] == 0
+
+
+def test_glossary_put_still_accepts_a_bare_list(a_client: int) -> None:
+    """The shipped `dist` on the shop PC may be older than this server."""
+    body = client.put(
+        f"/api/clients/{a_client}/glossary",
+        json=[{"source_term": "pickle", "target_term": "അച്ചാർ"}],
+    ).json()
+    assert body["terms"][0]["target_term"] == "അച്ചാർ"
 
 
 def test_correcting_a_term_updates_not_duplicates(a_client: int) -> None:
@@ -100,7 +131,7 @@ def test_correcting_a_term_updates_not_duplicates(a_client: int) -> None:
     rows = client.put(
         f"/api/clients/{a_client}/glossary",
         json=[{"source_term": "pickle", "target_term": "അച്ചാർ"}],
-    ).json()
+    ).json()["terms"]
     assert len(rows) == 1
     assert rows[0]["target_term"] == "അച്ചാർ"
 
@@ -117,8 +148,8 @@ def test_two_clients_do_not_share_terms() -> None:
         f"/api/clients/{b}/glossary",
         json=[{"source_term": "Fresh", "target_term": "പുതിയ"}],
     )
-    assert client.get(f"/api/clients/{a}/glossary").json()[0]["target_term"] == "ആംബർ ഫ്രഷ്"
-    assert client.get(f"/api/clients/{b}/glossary").json()[0]["target_term"] == "പുതിയ"
+    assert terms_of(a)[0]["target_term"] == "ആംബർ ഫ്രഷ്"
+    assert terms_of(b)[0]["target_term"] == "പുതിയ"
 
 
 def test_glossary_for_unknown_client_is_404() -> None:

@@ -213,3 +213,32 @@ def test_features_endpoint_reports_what_is_installed() -> None:
     body = client.get("/api/features").json()
     assert "fonts" in body["available"], "the font converter is always available"
     assert isinstance(body["unavailable"], dict)
+
+
+# --- emoji reach this screen constantly (NEXT.md 3.4) --------------------
+
+
+def test_convert_reports_characters_that_will_not_print() -> None:
+    body = client.post(
+        "/api/fonts/convert",
+        json={"text": "ഓണം ആശംസകൾ 🎉", "direction": "to_ascii"},
+    ).json()
+    assert [c["character"] for c in body["unconvertible"]] == ["🎉"]
+    # Reporting only — the conversion itself is unchanged.
+    assert "🎉" in body["result"]
+
+
+def test_clean_text_reports_nothing() -> None:
+    body = client.post(
+        "/api/fonts/convert",
+        json={"text": "ഓണം ആശംസകൾ Focus 9847012345", "direction": "to_ascii"},
+    ).json()
+    assert body["unconvertible"] == []
+
+
+def test_the_unicode_direction_reports_nothing() -> None:
+    """Going back to Unicode can represent anything, so there is nothing to warn about."""
+    body = client.post(
+        "/api/fonts/convert", json={"text": "HmWw", "direction": "to_unicode"}
+    ).json()
+    assert body["unconvertible"] == []

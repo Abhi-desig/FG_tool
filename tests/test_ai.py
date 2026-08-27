@@ -599,3 +599,49 @@ def test_a_reply_with_no_image_does_not_claim_it_was_free(
     error = (result.error or "").lower()
     assert "nothing was charged" not in error
     assert "may still have been" in error and "console" in error
+
+
+# --- a key must never reach the screen (NEXT.md 3.17) --------------------
+
+
+def test_a_raw_sdk_exception_is_redacted_before_it_is_shown() -> None:
+    """`_friendly`'s fallback echoed 200 chars of the raw exception to the UI.
+
+    That made it the one path in the app where a credential could reach the
+    screen, against SECURITY.md §2 — which says a key is never logged and never
+    in an error message. The SDK usually does not include the key; "usually" is
+    not the standard for the only thing here with direct monetary value.
+    """
+    leaked = "AQ.Ab8RN6JxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxYZ"
+    message = ai.friendly_error(RuntimeError(f"internal error calling {leaked}"))
+    assert leaked not in message
+    assert "[redacted]" in message
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "AQ.Ab8RN6Jabcdefghijklmnopqrstuvwxyz012345",
+        "AIzaSyDabcdefghijklmnopqrstuvwxyz01234567",
+        "ya29.a0AfB_byC1234567890abcdefghijklmnop",
+        "Bearer abcdef1234567890ABCDEF",
+        "api_key=abcdef1234567890ABCDEF",
+    ],
+)
+def test_every_credential_shape_is_redacted(secret: str) -> None:
+    message = ai.friendly_error(RuntimeError(f"boom: {secret} at line 4"))
+    assert secret not in message, f"{secret} survived redaction"
+
+
+def test_redaction_does_not_eat_the_useful_part_of_the_message() -> None:
+    """An error nobody can read is not an improvement on one that leaks."""
+    message = ai.friendly_error(RuntimeError("upstream returned 503 unavailable"))
+    assert "503" in message
+    assert "unavailable" in message
+
+
+def test_friendly_error_is_the_public_name() -> None:
+    """api/ai.py reached across the module boundary for `_friendly` twice."""
+    assert ai.friendly_error(RuntimeError("deadline exceeded")) == ai._friendly(  # noqa: SLF001
+        RuntimeError("deadline exceeded")
+    )

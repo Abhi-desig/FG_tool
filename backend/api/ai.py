@@ -81,7 +81,7 @@ def test_key(name: str) -> dict[str, object]:
         db.record_key_test(name, False)
         return {
             "ok": False,
-            "message": ai._friendly(exc),  # noqa: SLF001
+            "message": ai.friendly_error(exc),
             "keys": db.list_api_keys(),
             "models": ai.model_settings(),
         }
@@ -120,7 +120,7 @@ def ai_models(refresh: bool = False) -> dict[str, object]:
     try:
         return ai.model_settings(ai.available_models()) | {"error": None}
     except Exception as exc:  # noqa: BLE001 - report, never raise past here
-        return ai.model_settings() | {"error": ai._friendly(exc)}  # noqa: SLF001
+        return ai.model_settings() | {"error": ai.friendly_error(exc)}
 
 
 @router.put("/ai/models")
