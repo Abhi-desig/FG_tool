@@ -165,6 +165,14 @@ export interface Job {
     tiles?: number
     note?: string
   } | null
+  /** Cancel was pressed; the current step has not ended yet. */
+  cancelling?: boolean
+  /** The running step cannot report progress — show motion, not a number. */
+  indeterminate?: boolean
+  /** The output file has been swept from disk. See SECURITY.md §5. */
+  files_deleted?: boolean
+  created_at?: number
+  finished_at?: number | null
 }
 
 export interface ModelRow {
@@ -262,6 +270,18 @@ export function startUpscale(
 
 export function jobStatus(id: string): Promise<Job> {
   return request<Job>(`/api/jobs/${id}`)
+}
+
+/**
+ * Every job this session, newest first.
+ *
+ * The server has kept 200 of these all along and the UI never asked. An 80-second
+ * cutout was reachable at `/api/jobs/{id}/result` long after the screen that
+ * started it had been navigated away from and the result apparently "lost"
+ * (NEXT.md 0.4).
+ */
+export function recentJobs(limit = 25): Promise<Job[]> {
+  return request<Job[]>(`/api/jobs?limit=${limit}`)
 }
 
 export function cancelJob(id: string): Promise<Job> {

@@ -240,6 +240,13 @@ def job_result(job_id: str) -> FileResponse:
         raise HTTPException(404, "No such job.")
     if job.status != "done" or not job.result:
         raise HTTPException(409, f"That job is {job.status}, not finished.")
+    if job.files_deleted:
+        raise HTTPException(
+            410,
+            f"That result was deleted {jobs.RESULT_TTL_SECONDS // 60} minutes after "
+            f"it finished, so client artwork does not sit on this machine. "
+            f"Run it again.",
+        )
 
     # The filename comes from our own job result, never from the client.
     path = (config.WORK_DIR / job_id / str(job.result["file"])).resolve()

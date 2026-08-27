@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import io
+import threading
 import time
 
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
-from backend import models
+from backend import config, jobs, main, models
+from backend.features import images
 from backend.main import app
 
 client = TestClient(app)
@@ -291,3 +293,150 @@ def test_a_very_large_upload_is_accepted() -> None:
     body = client.post("/api/images/inspect", files=upload(6000, 4000)).json()
     assert body["facts"]["width"] == 6000
     assert body["facts"]["megapixels"] == pytest.approx(24.0, abs=0.1)
+
+
+# --- job visibility and lifetime -----------------------------------------
+#
+# NEXT.md 0.4, 2.2, 2.3, 2.4. The work was never lost server-side; the UI simply
+# never asked, could not show a cancel in progress, and had no way to say that a
+# step reports no progress.
+
+
+def test_job_state_the_ui_needs_is_exposed() -> None:
+    """`cancelling` and `indeterminate` existed internally but never shipped.
+
+    Without them the UI could show nothing but "Removing background…" for the
+    11 seconds a cancel took on a GPU — minutes on the shop PC (NEXT.md 2.2).
+    """
+    job = jobs.run_sync("t", "test", lambda r: {"ok": True})
+    body = job.as_dict()
+    for key in ("cancelling", "indeterminate", "files_deleted", "finished_at"):
+        assert key in body, f"{key} missing from the job payload"
+
+
+def test_a_cancelling_job_says_so() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow(reporter: jobs.Reporter) -> dict[str, object]:
+        started.set()
+        release.wait(5)
+        reporter.check_cancelled()
+        return {}
+
+    job = jobs.submit("t", "slow", slow)
+    assert started.wait(5)
+    job.cancel()
+    # Reported immediately, while the uninterruptible block is still running.
+    assert job.as_dict()["cancelling"] is True
+    release.set()
+
+
+def test_a_finished_job_is_not_reported_as_cancelling() -> None:
+    job = jobs.run_sync("t", "test", lambda r: {"ok": True})
+    job.cancel()
+    assert job.as_dict()["cancelling"] is False
+
+
+def test_an_opaque_step_is_marked_indeterminate() -> None:
+    """A bar frozen at 35% for a minute is worse than no bar (NEXT.md 2.3)."""
+
+    def work(reporter: jobs.Reporter) -> dict[str, object]:
+        reporter.opaque_step("Removing background — cannot report progress", 0.35)
+        assert reporter._job.indeterminate is True  # noqa: SLF001
+        return {}
+
+    job = jobs.run_sync("t", "test", work)
+    # Cleared once the job ends, so a finished job never looks stuck.
+    assert job.as_dict()["indeterminate"] is False
+
+
+def test_a_named_step_clears_indeterminate() -> None:
+    def work(reporter: jobs.Reporter) -> dict[str, object]:
+        reporter.opaque_step("opaque", 0.3)
+        reporter.step("Writing PNG…", 0.9)
+        assert reporter._job.indeterminate is False  # noqa: SLF001
+        return {}
+
+    jobs.run_sync("t", "test", work)
+
+
+def test_the_cutout_step_says_it_cannot_report_progress(monkeypatch) -> None:
+    """The operator must be told, in the step text, not left guessing.
+
+    `rembg.remove` is stubbed rather than run: this is about what the operator
+    is told, and a real BiRefNet pass would add a minute to every test run for
+    one assertion about a string.
+    """
+    seen: list[str] = []
+
+    class Spy(jobs.Reporter):
+        def opaque_step(self, text: str, progress: float | None = None) -> None:
+            seen.append(text)
+            super().opaque_step(text, progress)
+
+    import contextlib
+
+    monkeypatch.setattr(
+        models, "loaded", lambda key: contextlib.nullcontext("stub-session")
+    )
+    stub = type(
+        "M", (), {"remove": staticmethod(lambda img, **kw: img.convert("RGBA"))}
+    )
+    monkeypatch.setitem(__import__("sys").modules, "rembg", stub)
+
+    job = jobs.Job(id="spy", kind="t", label="t")
+    images.cutout(Image.new("RGB", (64, 64), (10, 20, 30)), Spy(job))
+
+    assert seen, "the background-removal step did not declare itself opaque"
+    assert any("cannot report progress" in text for text in seen)
+    # And it names the wait and the hardware, so a long one is expected.
+    assert any("on " in text for text in seen)
+
+
+def test_the_cutout_estimate_scales_with_the_hardware() -> None:
+    """A minute on a GPU is minutes on the shop PC's i3, and it must say so."""
+    seconds = images.estimate_cutout_seconds(4000, 3000)
+    assert seconds > 0
+    assert images._minutes_phrase(45) == "about 45 seconds"  # noqa: SLF001
+    assert images._minutes_phrase(300) == "about 5 minutes"  # noqa: SLF001
+    assert images._minutes_phrase(60) == "about 60 seconds"  # noqa: SLF001
+
+
+def test_expired_jobs_are_swept_and_say_so() -> None:
+    """SECURITY.md §5 promised this and it was not happening (NEXT.md 2.4)."""
+    job = jobs.run_sync("t", "test", lambda r: {"file": "x.png"})
+    directory = config.WORK_DIR / job.id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "x.png").write_bytes(png())
+
+    # Pretend it finished an hour ago.
+    job.finished_at = time.time() - 3601
+    assert job in jobs.registry.expired()
+
+    removed = main.sweep_expired_jobs()
+    assert removed >= 1
+    assert not directory.exists(), "client artwork was left on disk"
+    assert job.files_deleted is True
+    assert jobs.registry.expired() == [], "a swept job must not be swept twice"
+
+
+def test_downloading_a_swept_result_explains_itself() -> None:
+    """A bare 404 reads as a bug. This is a deliberate deletion."""
+    job = jobs.run_sync("t", "test", lambda r: {"file": "x.png", "media_type": "image/png"})
+    job.finished_at = time.time() - 3601
+    main.sweep_expired_jobs()
+
+    response = client.get(f"/api/jobs/{job.id}/result")
+    assert response.status_code == 410
+    assert "deleted" in response.json()["detail"].lower()
+
+
+def test_a_fresh_job_is_never_swept() -> None:
+    job = jobs.run_sync("t", "test", lambda r: {"file": "x.png"})
+    directory = config.WORK_DIR / job.id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "x.png").write_bytes(png())
+    main.sweep_expired_jobs()
+    assert directory.exists(), "a result the operator may still want was deleted"
+    assert job.files_deleted is False

@@ -38,7 +38,13 @@ const Toaster = ({ ...props }: ToasterProps) => {
         classNames: {
           toast: "cn-toast",
         },
+        // NEXT.md 3.5: toasts sat on screen through five navigations and covered
+        // live UI — a step heading and the Settings models table. Nothing here is
+        // the only copy of anything (results live in "This session's results"),
+        // so a toast can be a notification rather than a record.
+        duration: 5000,
       }}
+      closeButton
       {...props}
     />
   )

@@ -25,24 +25,38 @@ const STYLES = {
   },
 } as const
 
+const DESCRIBING_LABEL: Record<string, string> = {
+  enlarged: "After enlarging",
+  // NEXT.md 3.6: this card used to sit unlabelled above a finished cutout,
+  // reading as a judgement on the result. Cutting out does not change the pixel
+  // count, so the verdict is still correct — it is simply about the upload, and
+  // it now says which.
+  source: "About the image you uploaded",
+}
+
 export function PrintVerdict({
   assessment,
   describing = "original",
 }: {
   assessment: Assessment
-  /** Which pixels this verdict is about — the upload, or the enlarged result. */
-  describing?: "original" | "enlarged"
+  /**
+   * Which pixels this verdict is about: the upload on its own (`original`), the
+   * enlarged result (`enlarged`), or the upload while a different result is on
+   * screen beside it (`source`).
+   */
+  describing?: "original" | "enlarged" | "source"
 }) {
   const style = STYLES[assessment.verdict]
+  const label = DESCRIBING_LABEL[describing]
 
   return (
     <section
       aria-live="polite"
       className={`rounded-xl border p-5 ${style.ring}`}
     >
-      {describing === "enlarged" && (
+      {label && (
         <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          After enlarging
+          {label}
         </p>
       )}
       <div className="flex items-start gap-3">

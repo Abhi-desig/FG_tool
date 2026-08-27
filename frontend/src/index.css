@@ -165,6 +165,19 @@
     line-height: 1.6;
     word-break: break-all;
   }
+
+  /* Transparency, shown as transparency. A cutout previewed on opaque grey
+     makes "did the background come off?" unanswerable — the only question that
+     screen exists to answer. Fixed light greys in both themes, because the
+     point is to read as "nothing here", not as a colour. */
+  .checkerboard {
+    background-color: #ffffff;
+    background-image:
+      linear-gradient(45deg, #d4d4d8 25%, transparent 25%, transparent 75%, #d4d4d8 75%),
+      linear-gradient(45deg, #d4d4d8 25%, transparent 25%, transparent 75%, #d4d4d8 75%);
+    background-position: 0 0, 8px 8px;
+    background-size: 16px 16px;
+  }
 }
 
 /* DESIGN.md motion budget: 150–200ms, and nothing that ignores the OS setting. */

@@ -27,6 +27,49 @@ from backend.features import fonts, prompts, styles
 
 MAX_INPUT_CHARS = 20_000
 
+# How often the temp-file sweep runs. Well under the TTL so nothing is much
+# overdue, and cheap enough to be invisible on an idle machine.
+SWEEP_INTERVAL_SECONDS = 60
+
+
+def sweep_expired_jobs() -> int:
+    """Delete the files of jobs past their TTL. Returns how many were removed.
+
+    SECURITY.md §5 promised temp files were cleaned up after each job. They were
+    not — `WORK_DIR` was wiped at startup and clean shutdown only, so a session's
+    client photos and spreadsheets accumulated, and a power cut left them there
+    until the next launch (NEXT.md 2.4).
+
+    The job stays in the history with `files_deleted` set, so the operator is
+    told the result has expired rather than handed a Download button that 404s.
+    """
+    removed = 0
+    for job in jobs.registry.expired():
+        directory = config.WORK_DIR / job.id
+        if directory.exists():
+            shutil.rmtree(directory, ignore_errors=True)
+        job.files_deleted = True
+        removed += 1
+    return removed
+
+
+def _start_sweeper(stop: threading.Event) -> threading.Thread:
+    """Run the sweep on a timer for as long as the server is up."""
+
+    def loop() -> None:
+        # Checked far more often than the TTL so a file is never much overdue,
+        # and cheaply enough that it costs nothing on an idle shop PC.
+        while not stop.wait(SWEEP_INTERVAL_SECONDS):
+            try:
+                sweep_expired_jobs()
+            except OSError as exc:
+                # A locked or vanished file must not kill the sweeper.
+                print(f"  sweep warning: {exc}")
+
+    thread = threading.Thread(target=loop, name="sweep", daemon=True)
+    thread.start()
+    return thread
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -49,10 +92,18 @@ async def lifespan(app: FastAPI):
         shutil.rmtree(config.WORK_DIR, ignore_errors=True)
     config.WORK_DIR.mkdir(parents=True, exist_ok=True)
 
+    stop_sweeping = threading.Event()
+    _start_sweeper(stop_sweeping)
+    print(
+        f"  temp files: deleted {jobs.RESULT_TTL_SECONDS // 60} minutes after a job "
+        f"finishes"
+    )
+
     print(f"\n  Focus Toolkit → http://{config.HOST}:{config.PORT}\n")
     try:
         yield
     finally:
+        stop_sweeping.set()
         jobs.registry.shutdown()
         shutil.rmtree(config.WORK_DIR, ignore_errors=True)
 

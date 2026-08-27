@@ -4,6 +4,7 @@ import { toast } from "sonner"
 import { AiPhotoEdit } from "@/components/AiPhotoEdit"
 import { JobProgress } from "@/components/JobProgress"
 import { PrintVerdict } from "@/components/PrintVerdict"
+import { RecentJobs } from "@/components/RecentJobs"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -34,6 +35,19 @@ import {
 } from "@/lib/api"
 
 const UNITS: PrintUnit[] = ["feet", "inch", "cm", "mm"]
+
+/**
+ * A file size the operator can trust.
+ *
+ * `(bytes / 1_048_576).toFixed(1)` printed "0.0 MB" for a 32 KB cutout, which
+ * reads as an empty file — exactly the wrong impression for the one screen whose
+ * job is to say whether the output is usable (NEXT.md 3.2).
+ */
+function formatBytes(bytes: number): string {
+  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${bytes} bytes`
+}
 
 /**
  * Phase 2. Inspect a client image, get an honest answer about what size it can
@@ -192,7 +206,8 @@ export function ImageTools() {
         >
           <span className="text-base font-medium">Drop a client image here</span>
           <span className="text-sm text-muted-foreground">
-            or click to browse — PNG, JPEG, TIFF, WEBP
+            {/* Must match ALLOWED_FORMATS in backend/features/images.py. */}
+            or click to browse — PNG, JPEG, TIFF, WEBP, BMP
           </span>
         </button>
       )}
@@ -218,8 +233,24 @@ export function ImageTools() {
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           {/* Left: the answer */}
           <div className="space-y-4">
+            {/*
+              NEXT.md 3.6: a red "Not enough pixels" card used to sit above a
+              finished cutout, still describing the original upload. A cutout
+              does not change the pixel count, so the verdict is still true —
+              but it is about the source, and it must say so rather than appear
+              to be a judgement on the result the operator is looking at.
+            */}
             {assessment && (
-              <PrintVerdict assessment={assessment} describing={enlarged ? "enlarged" : "original"} />
+              <PrintVerdict
+                assessment={assessment}
+                describing={
+                  enlarged
+                    ? "enlarged"
+                    : job?.status === "done"
+                      ? "source"
+                      : "original"
+                }
+              />
             )}
 
             {job && (
@@ -229,7 +260,19 @@ export function ImageTools() {
                 onDone={(finished) =>
                   toast.success(
                     finished.kind === "cutout" ? "Background removed" : "Image enlarged",
-                    { description: finished.result?.note ?? "Ready to download." },
+                    {
+                      description: finished.result?.note ?? "Ready to download.",
+                      // NEXT.md 0.4: the toast used to be a dead statement
+                      // pointing at a result the screen had already discarded.
+                      action: finished.result
+                        ? {
+                            label: "Download",
+                            onClick: () => {
+                              window.location.href = jobResultUrl(finished.id)
+                            },
+                          }
+                        : undefined,
+                    },
                   )
                 }
               />
@@ -242,8 +285,7 @@ export function ImageTools() {
                     <p className="text-sm font-medium">Result</p>
                     <p className="text-xs text-muted-foreground">
                       {job.result.width}×{job.result.height} px ·{" "}
-                      {job.result.dpi} DPI ·{" "}
-                      {(job.result.bytes / 1_048_576).toFixed(1)} MB
+                      {job.result.dpi} DPI · {formatBytes(job.result.bytes)}
                       {job.result.tiles ? ` · ${job.result.tiles} tiles` : ""}
                     </p>
                   </div>
@@ -256,8 +298,18 @@ export function ImageTools() {
                 <img
                   src={jobPreviewUrl(job.id)}
                   alt="Result preview"
-                  className="mt-3 max-h-[320px] w-full rounded-lg bg-[#808080] object-contain"
+                  /*
+                   * A cutout is transparent, and on opaque grey "did the
+                   * background come off?" is unanswerable — the one question
+                   * this screen exists to answer (NEXT.md 3.3).
+                   */
+                  className="checkerboard mt-3 max-h-[320px] w-full rounded-lg object-contain"
                 />
+                {job.kind === "cutout" && (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    The chequered squares are transparency, not part of the image.
+                  </p>
+                )}
               </div>
             )}
 
@@ -269,6 +321,12 @@ export function ImageTools() {
                 className="max-h-[360px] w-full rounded-xl border bg-[#808080] object-contain"
               />
             )}
+
+            {/*
+              NEXT.md 0.4: an 80-second result used to vanish when the operator
+              clicked another screen. The server had kept it all along.
+            */}
+            <RecentJobs refreshKey={job?.status} />
           </div>
 
           {/* Right: the controls */}

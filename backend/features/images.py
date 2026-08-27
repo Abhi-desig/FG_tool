@@ -61,6 +61,11 @@ MAX_OUTPUT_PIXELS = 300_000_000
 # The 40× gap is why the UI states the estimate before the operator commits.
 TILE_SECONDS = {"gpu": 0.06, "cpu": 2.5}
 
+# One BiRefNet pass. Measured on 2026-08-26: 61 s end to end on CoreML for a
+# 12 MP photo. The CPU figure carries the same gpu:cpu ratio as TILE_SECONDS,
+# which is the only evidence available until the shop PC is timed directly.
+CUTOUT_SECONDS = {"gpu": 60.0, "cpu": 300.0}
+
 ALLOWED_FORMATS = {"PNG", "JPEG", "TIFF", "WEBP", "BMP"}
 
 
@@ -123,6 +128,27 @@ def facts(image: Image.Image) -> ImageFacts:
 # --- background removal ---------------------------------------------------
 
 
+def estimate_cutout_seconds(width: int, height: int) -> float:
+    """Rough wall-clock for one BiRefNet pass.
+
+    BiRefNet runs at a fixed input resolution, so the cost barely moves with the
+    source size — it is a hardware constant far more than an image one. Measured
+    on 2026-08-26: 61 s on CoreML for a 12 MP photo. The shop PC's i3 has no GPU,
+    and the CPU figure is scaled from the ratio measured for Real-ESRGAN.
+    """
+    on_gpu = config.providers()[0] != "CPUExecutionProvider"
+    base = CUTOUT_SECONDS["gpu" if on_gpu else "cpu"]
+    # A very large source still costs something to resize and to composite.
+    megapixels = (width * height) / 1_000_000
+    return base + max(0.0, megapixels - 12) * (0.4 if on_gpu else 2.0)
+
+
+def _minutes_phrase(seconds: float) -> str:
+    if seconds < 90:
+        return f"about {round(seconds)} seconds"
+    return f"about {round(seconds / 60)} minute{'' if round(seconds / 60) == 1 else 's'}"
+
+
 def cutout(
     image: Image.Image,
     reporter: Reporter | None = None,
@@ -142,7 +168,18 @@ def cutout(
 
     with models.loaded(config.BACKGROUND_MODEL) as session:
         if reporter:
-            reporter.step("Removing background…", 0.35)
+            # One uninterruptible call: there is no callback to hook and no
+            # tiling to count, so the app genuinely cannot report progress here.
+            # Measured, this stretch was 54 of the job's 61 seconds with the bar
+            # frozen at 35% and the step text unchanged — which reads as a crash
+            # on the shop PC, where it is minutes. Saying so is the honest
+            # option, and it is the one DESIGN.md's spirit asks for.
+            expected = estimate_cutout_seconds(image.width, image.height)
+            reporter.opaque_step(
+                f"Removing background — {_minutes_phrase(expected)} on "
+                f"{config.device_name()}. This step cannot report progress.",
+                0.35,
+            )
         result = remove(
             image.convert("RGB"),
             session=session,

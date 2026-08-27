@@ -47,6 +47,9 @@ export function Sidebar({ active, onSelect }: Props) {
             key={feature.id}
             variant={active === feature.id ? "secondary" : "ghost"}
             disabled={!ready}
+            // Colour and weight are not enough on their own — a screen reader
+            // needs to be told which item is the current one (NEXT.md 3.10).
+            aria-current={active === feature.id ? "page" : undefined}
             onClick={() => onSelect(feature.id)}
             className="h-auto justify-start px-2 py-2 text-left font-normal"
           >
@@ -66,6 +69,7 @@ export function Sidebar({ active, onSelect }: Props) {
 
       <Button
         variant={active === "settings" ? "secondary" : "ghost"}
+        aria-current={active === "settings" ? "page" : undefined}
         onClick={() => onSelect("settings")}
         className="h-auto justify-start px-2 py-2 text-left font-normal"
       >

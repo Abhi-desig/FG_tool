@@ -74,7 +74,13 @@ Client artwork and catalogues are confidential business material.
 - Features 1–4 make **no network calls**. This is a feature, and worth telling clients.
 - Feature 5 sends images and prompts to Google. The operator should know which client work is
   acceptable to send off-machine, and the UI must make it obvious when a job leaves the building.
-- Temp files are cleaned up after each job — client artwork should not accumulate in a temp folder.
+- Temp files are cleaned up on a timer, not left for the whole session. A job's working
+  directory is deleted `jobs.RESULT_TTL_SECONDS` after it finishes (30 minutes), swept once a
+  minute by a background thread in `main.py`. `WORK_DIR` is also wiped at startup and at clean
+  shutdown, which is the backstop for a power cut — the sweep is what stops artwork accumulating
+  *during* a session.
+- A job whose files have been swept stays in the history with `files_deleted` set, and the
+  download route answers `410` with an explanation rather than a bare `404`.
 - Job history stores metadata and paths, not copies of client files.
 
 ## 6 · Secrets in git

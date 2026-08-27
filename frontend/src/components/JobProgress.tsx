@@ -58,26 +58,53 @@ export function JobProgress({
 
   const percent = Math.round(job.progress * 100)
 
+  /*
+   * Cancellation is cooperative: the model call it is inside cannot be
+   * interrupted, so the job keeps running for up to a few seconds on a GPU and
+   * minutes on the shop PC's i3. Saying "Cancelling…" is the difference between
+   * a slow stop and a dead button (NEXT.md 2.2).
+   */
+  const cancelling = job.cancelling === true
+
   return (
     <div className="rounded-xl border bg-card p-4">
       <div className="flex items-baseline justify-between gap-3">
-        <p className="text-sm font-medium">{job.step}</p>
+        <p className="text-sm font-medium">
+          {cancelling ? "Cancelling…" : job.step}
+        </p>
         <p className="text-xs tabular-nums text-muted-foreground">
-          {percent}%
+          {/* A percentage that has stopped moving is worse than no percentage. */}
+          {job.indeterminate ? "working" : `${percent}%`}
           {/* Elapsed appears past 10s, when the wait starts to feel wrong. */}
           {job.elapsed >= 10 && ` · ${formatElapsed(job.elapsed)}`}
         </p>
       </div>
-      <Progress value={percent} className="mt-3" />
+      <Progress
+        value={percent}
+        className="mt-3"
+        aria-valuenow={job.indeterminate ? undefined : percent}
+        aria-valuetext={
+          job.indeterminate
+            ? `${job.step} — this step does not report progress`
+            : `${percent}%`
+        }
+      />
+      {cancelling && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Waiting for the current step to finish — it cannot be interrupted part
+          way through.
+        </p>
+      )}
       <div className="mt-3 flex items-center justify-between gap-3">
         <p className="text-xs text-muted-foreground">{job.label}</p>
         <Button
           variant="ghost"
           size="sm"
           className="h-7 px-2 text-xs"
+          disabled={cancelling}
           onClick={() => void cancelJob(job.id).then(onUpdate)}
         >
-          Cancel
+          {cancelling ? "Cancelling…" : "Cancel"}
         </Button>
       </div>
     </div>
