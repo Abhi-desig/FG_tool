@@ -575,7 +575,8 @@ def test_measured_text_is_fitted_inside_the_safe_box(
     assert fitted.width <= limit + 1e-6, (
         f"{note}: fitted to {fitted.width:.3f} of the canvas, box allows {limit:.3f}"
     )
-    assert not fitted.overflows, f"{note}: auto-fit gave up on ordinary shop copy"
+    assert not fitted.overflows, f"{note}: text would be trimmed off the sheet"
+    assert not fitted.over_box, f"{note}: auto-fit gave up on ordinary shop copy"
     assert fitted.font_px > 0
 
 

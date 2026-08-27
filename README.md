@@ -142,7 +142,22 @@ npm run dev      # http://localhost:5173, proxied to the Python API
 npm run build    # emits frontend/dist/, which FastAPI serves
 ```
 
-Commit `frontend/dist/` output as part of a release so the shop PC gets a ready-built UI.
+### Releasing the UI
+
+`frontend/dist/` is gitignored during development and **force-added on the release commit**, so
+the shop PC — which has no Node — can run a plain clone.
+
+```bash
+cd frontend && npm run build && cd ..
+git add -f frontend/dist
+uv run python scripts/check_release.py
+```
+
+**Run the check before every push.** It fails when the committed bundle is not the built one, which
+is not hypothetical: `519de89` changed ~2,000 lines of frontend and never re-added `dist`, so the
+tracked bundle stayed the pre-Phase-5 UI with no AI screens in it, and nothing reported it. The
+check also catches the trap state that leaves — tracked assets showing as deleted while the real
+build is untracked, where one `git checkout .` silently reverts the shop PC to the old bundle.
 
 ### Tests
 

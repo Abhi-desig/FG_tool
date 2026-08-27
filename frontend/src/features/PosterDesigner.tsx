@@ -190,13 +190,29 @@ export function PosterDesigner() {
   )
 
   /**
-   * Blocks auto-fit could not rescue. Export is blocked while any exist: a
-   * poster with the shop's name running off both edges is the expensive,
-   * visible error this tool is for, and it is worth a hard stop rather than a
-   * message the operator can scroll past.
+   * Blocks that will be trimmed off the printed sheet.
+   *
+   * Export is blocked while any exist: a poster with the shop's name running off
+   * both edges is the expensive, visible error this tool is for, and it is worth
+   * a hard stop rather than a message the operator can scroll past.
    */
-  const overflowing = useMemo(
+  const pastTrim = useMemo(
     () => new Set(Object.entries(fits).filter(([, f]) => f.overflows).map(([id]) => id)),
+    [fits],
+  )
+
+  /**
+   * Blocks wider than their own box but still inside the trim. Worth saying —
+   * the operator drags the box wider and it is done — but not worth blocking an
+   * export over, and conflating the two made the message useless.
+   */
+  const overBox = useMemo(
+    () =>
+      new Set(
+        Object.entries(fits)
+          .filter(([, f]) => f.overBox && !f.overflows)
+          .map(([id]) => id),
+      ),
     [fits],
   )
 
@@ -505,10 +521,10 @@ export function PosterDesigner() {
                   className={`absolute cursor-move select-none rounded px-1 outline-offset-2 ${
                     selected === block.id ? "ring-2 ring-primary" : ""
                   } ${
-                    overflowing.has(block.id)
+                    pastTrim.has(block.id) || unsafe.has(block.id)
                       ? "ring-2 ring-destructive"
-                      : unsafe.has(block.id)
-                        ? "ring-2 ring-destructive"
+                      : overBox.has(block.id)
+                        ? "ring-2 ring-[color:var(--warn)]"
                         : ""
                   }`}
                   style={{
@@ -543,24 +559,38 @@ export function PosterDesigner() {
             render below them, so the operator could reach "Export SVG" without
             the overflow warning ever entering view.
           */}
-          {overflowing.size > 0 && (
+          {pastTrim.size > 0 && (
             <div
               role="alert"
               className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm"
             >
               <p className="font-medium text-destructive">
-                {overflowing.size === 1 ? "One line does" : `${overflowing.size} lines do`} not
-                fit the page.
+                {pastTrim.size === 1 ? "One line will" : `${pastTrim.size} lines will`} be
+                cut off when printed.
               </p>
-              {(check?.overflow ?? []).map((o) => (
-                <p key={o.id} className="mt-1 text-destructive">
-                  {o.message}
-                </p>
-              ))}
+              {(check?.overflow ?? [])
+                .filter((o) => o.past_trim)
+                .map((o) => (
+                  <p key={o.id} className="mt-1 text-destructive">
+                    {o.message}
+                  </p>
+                ))}
               <p className="mt-1 text-muted-foreground">
-                Export is off until this is fixed — a poster with a line running off
-                the edge cannot be printed.
+                Export is off until this is fixed.
               </p>
+            </div>
+          )}
+
+          {overBox.size > 0 && (
+            <div className="rounded-lg border bg-muted/40 p-3 text-sm">
+              <p className="font-medium">Room to spare</p>
+              {(check?.overflow ?? [])
+                .filter((o) => !o.past_trim)
+                .map((o) => (
+                  <p key={o.id} className="mt-1 text-muted-foreground">
+                    {o.message}
+                  </p>
+                ))}
             </div>
           )}
 
@@ -611,13 +641,13 @@ export function PosterDesigner() {
               <Button
                 variant="outline"
                 onClick={() => void exportPng()}
-                disabled={busy || blocks.length === 0 || overflowing.size > 0}
+                disabled={busy || blocks.length === 0 || pastTrim.size > 0}
               >
                 PNG proof
               </Button>
               <Button
                 onClick={() => void exportSvg()}
-                disabled={busy || blocks.length === 0 || overflowing.size > 0}
+                disabled={busy || blocks.length === 0 || pastTrim.size > 0}
               >
                 Export SVG
               </Button>

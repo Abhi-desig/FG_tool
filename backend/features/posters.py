@@ -769,7 +769,11 @@ class Fitted:
     lines: list[str]
     shrunk: bool
     wrapped: bool
-    # True when even the smallest allowed size, wrapped, still runs off the box.
+    # Wider than its own box at the smallest readable size. Recoverable by
+    # widening the box, so it is advice rather than a blocker.
+    over_box: bool
+    # Wider than the *safe zone* — it will be trimmed off the page. This is the
+    # one that stops an export, because no amount of dragging fixes it.
     overflows: bool
     # Fraction of canvas width the widest line occupies.
     width: float
@@ -828,10 +832,21 @@ def fit_block(
     limit_fraction = min(block.width, 1 - 2 * inset_x)
     limit_px = max(limit_fraction * canvas.width_px, 1.0)
 
+    # Working from an estimate, aim *inside* the box by the estimator's known
+    # error, so a 15%-low estimate still produces text that fits.
+    #
+    # The margin has to be applied here rather than to the finished width. Doing
+    # it afterwards guaranteed a false overflow warning on every block the fitter
+    # had just brought exactly to the limit — measured against a live server:
+    # the shop name wrapped correctly to two lines and was still reported as
+    # running off the page.
+    if measured_em is None:
+        limit_px /= _ESTIMATE_MARGIN
+
     if total_em <= 0:
         return Fitted(
             id=block.id, font_px=requested_px, scale=1.0, lines=[block.text],
-            shrunk=False, wrapped=False, overflows=False, width=0.0,
+            shrunk=False, wrapped=False, over_box=False, overflows=False, width=0.0,
             height=requested_px * LINE_HEIGHT / canvas.height_px,
         )
 
@@ -839,7 +854,7 @@ def fit_block(
     if total_em * requested_px <= limit_px:
         return Fitted(
             id=block.id, font_px=requested_px, scale=1.0, lines=[block.text],
-            shrunk=False, wrapped=False, overflows=False,
+            shrunk=False, wrapped=False, over_box=False, overflows=False,
             width=total_em * requested_px / canvas.width_px,
             height=requested_px * LINE_HEIGHT / canvas.height_px,
         )
@@ -850,7 +865,7 @@ def fit_block(
         font_px = requested_px * scale
         return Fitted(
             id=block.id, font_px=font_px, scale=scale, lines=[block.text],
-            shrunk=True, wrapped=False, overflows=False,
+            shrunk=True, wrapped=False, over_box=False, overflows=False,
             width=total_em * font_px / canvas.width_px,
             height=font_px * LINE_HEIGHT / canvas.height_px,
         )
@@ -866,19 +881,33 @@ def fit_block(
         if widest * font_px <= limit_px:
             return Fitted(
                 id=block.id, font_px=font_px, scale=trial, lines=lines,
-                shrunk=trial < 1.0, wrapped=len(lines) > 1, overflows=False,
+                shrunk=trial < 1.0, wrapped=len(lines) > 1,
+                over_box=False, overflows=False,
                 width=widest * font_px / canvas.width_px,
                 height=len(lines) * font_px * LINE_HEIGHT / canvas.height_px,
             )
 
     # 4. A single word wider than the box at the smallest allowed size.
+    #
+    # Two different problems, and conflating them made the message useless. A
+    # word past its own *box* is fixed by widening the box — the operator drags
+    # a handle and it is done. A word past the *safe zone* will be trimmed off
+    # the printed sheet, and no amount of dragging helps. Only the second is
+    # worth blocking an export over.
     font_px = requested_px * MIN_FIT_SCALE
     lines = _wrap_to(block.text, limit_px / font_px)
     widest = max(_advance_em(_line_text(block, line)) for line in lines)
+    width = widest * font_px / canvas.width_px
+
+    safe_fraction = 1 - 2 * inset_x
+    if measured_em is None:
+        safe_fraction /= _ESTIMATE_MARGIN
+
     return Fitted(
         id=block.id, font_px=font_px, scale=MIN_FIT_SCALE, lines=lines,
-        shrunk=True, wrapped=len(lines) > 1, overflows=True,
-        width=widest * font_px / canvas.width_px,
+        shrunk=True, wrapped=len(lines) > 1,
+        over_box=True, overflows=width > safe_fraction,
+        width=width,
         height=len(lines) * font_px * LINE_HEIGHT / canvas.height_px,
     )
 
@@ -915,21 +944,35 @@ def overflow_warnings(
     notes: list[dict[str, object]] = []
     for block in layout.blocks:
         fitted = fits[block.id]
-        # Trust a real browser measurement exactly; pad an estimate by its known
-        # error so a block that will overflow is never called safe.
         certain = measured is not None and block.id in measured
-        effective = fitted.width if certain else fitted.width * _ESTIMATE_MARGIN
-        if not fitted.overflows and effective <= block.width:
+
+        # No extra margin here: `fit_block` already aimed inside the box by
+        # `_ESTIMATE_MARGIN` when it had no measurement to work from, so a fitted
+        # width is a width that fits. Padding it again reported correctly-fitted
+        # text as overflowing — measured against a live server.
+        if not fitted.over_box:
             continue
+
+        if fitted.overflows:
+            message = (
+                f"“{block.text[:28]}” runs past the trim edge even at the "
+                f"smallest readable size. It will be cut off when printed — "
+                f"shorten it, or use a wider canvas."
+            )
+        else:
+            message = (
+                f"“{block.text[:28]}” is wider than its box. Drag the box wider "
+                f"— there is room on the page. Nothing will be cut off."
+            )
+
         notes.append(
             {
                 "id": block.id,
-                "message": (
-                    f"“{block.text[:28]}” is too long for this size — it still "
-                    f"runs past the edge at the smallest size that stays "
-                    f"readable. Shorten it, or use a wider canvas."
-                ),
-                "estimated_width": round(effective, 3),
+                "message": message,
+                # True when this will actually be trimmed off the sheet, which is
+                # what the designer blocks export on.
+                "past_trim": fitted.overflows,
+                "estimated_width": round(fitted.width, 3),
                 "box_width": block.width,
                 "measured": certain,
             }
@@ -946,6 +989,10 @@ def fit_report(
     for block in layout.blocks:
         fitted = fits[block.id]
         if not (fitted.shrunk or fitted.wrapped):
+            continue
+        # "…was shrunk to fit the page" alongside "…runs past the trim edge" is a
+        # contradiction. When the fit failed, `overflow_warnings` has the floor.
+        if fitted.over_box:
             continue
         if fitted.wrapped and fitted.shrunk:
             what = f"shrunk to {fitted.scale:.0%} and wrapped onto {len(fitted.lines)} lines"

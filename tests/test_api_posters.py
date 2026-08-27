@@ -95,11 +95,47 @@ def test_check_reports_what_auto_fit_changed() -> None:
     """A shrunk or wrapped block must be declared, not silently different."""
     layout = {
         "canvas": "a4-portrait",
-        "blocks": [{"id": "h", "text": "ഫോക്കസ് ഡിജിറ്റൽസ്", "size": "huge", "y": 0.1}],
+        "blocks": [
+            {"id": "h", "text": "ഫോക്കസ് ഡിജിറ്റൽസ്", "size": "huge", "y": 0.1, "width": 0.95}
+        ],
     }
     body = client.post("/api/posters/check", json={"layout": layout}).json()
     assert body["fitted"], "the headline was adjusted and nothing said so"
-    assert body["blocks"][0]["lines"]
+    assert len(body["blocks"][0]["lines"]) > 1, "it should have wrapped"
+    assert body["overflow"] == [], "it fits — nothing to warn about"
+
+
+def test_a_block_wider_than_its_box_is_advice_not_a_blocker() -> None:
+    """Two different problems, and conflating them made the message useless.
+
+    Past its own box is fixed by dragging the box wider. Past the trim will be
+    cut off the printed sheet. Only the second stops an export.
+    """
+    layout = {
+        "canvas": "a4-portrait",
+        "blocks": [
+            {"id": "h", "text": "ഫോക്കസ് ഡിജിറ്റൽസ്", "size": "huge", "y": 0.1, "width": 0.8}
+        ],
+    }
+    body = client.post("/api/posters/check", json={"layout": layout}).json()
+    assert body["blocks"][0]["over_box"] is True
+    assert body["blocks"][0]["overflows"] is False
+    warning = body["overflow"][0]
+    assert warning["past_trim"] is False
+    assert "wider" in warning["message"]
+    # And it must not also claim the fit succeeded — that is a contradiction.
+    assert body["fitted"] == []
+
+
+def test_text_past_the_trim_is_reported_as_such() -> None:
+    layout = {
+        "canvas": "a4-portrait",
+        "blocks": [{"id": "x", "text": "X" * 400, "size": "huge", "y": 0.3}],
+    }
+    body = client.post("/api/posters/check", json={"layout": layout}).json()
+    assert body["blocks"][0]["overflows"] is True
+    assert body["overflow"][0]["past_trim"] is True
+    assert "cut off" in body["overflow"][0]["message"]
 
 
 def test_check_prefers_a_browser_measurement_over_its_own_estimate() -> None:

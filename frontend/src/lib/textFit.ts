@@ -79,7 +79,15 @@ export interface FittedBlock {
   lines: string[]
   shrunk: boolean
   wrapped: boolean
-  /** Still runs past the box at the smallest size that stays readable. */
+  /**
+   * Wider than its own box at the smallest readable size — fixed by dragging
+   * the box wider, so it is advice rather than a blocker.
+   */
+  overBox: boolean
+  /**
+   * Wider than the safe zone: it will be trimmed off the printed sheet, and no
+   * amount of dragging helps. This is what stops an export.
+   */
   overflows: boolean
 }
 
@@ -132,6 +140,7 @@ export function fitBlock(block: PosterBlock, preset: CanvasPreset): FittedBlock 
     lines: [block.text],
     shrunk,
     wrapped: false,
+    overBox: false,
     overflows: false,
   })
 
@@ -154,21 +163,25 @@ export function fitBlock(block: PosterBlock, preset: CanvasPreset): FittedBlock 
         lines,
         shrunk: trial < 1,
         wrapped: lines.length > 1,
+        overBox: false,
         overflows: false,
       }
     }
   }
 
-  // One word is wider than the box even at the smallest allowed size.
+  // One word is wider than the box even at the smallest allowed size. Whether
+  // that matters depends on which edge it passes — see FittedBlock.
   const fontPx = requestedPx * MIN_FIT_SCALE
-  const { lines } = wrapTo(block.text, limitPx / fontPx, bold)
+  const { lines, widest } = wrapTo(block.text, limitPx / fontPx, bold)
+  const width = (widest * fontPx) / preset.width_px
   return {
     fontPx,
     scale: MIN_FIT_SCALE,
     lines,
     shrunk: true,
     wrapped: lines.length > 1,
-    overflows: true,
+    overBox: true,
+    overflows: width > 1 - 2 * insetX,
   }
 }
 

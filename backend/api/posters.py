@@ -149,6 +149,7 @@ def check(body: CheckRequest) -> dict[str, object]:
                 "font_px": round(f.font_px, 1),
                 "scale": round(f.scale, 3),
                 "lines": f.lines,
+                "over_box": f.over_box,
                 "overflows": f.overflows,
             }
             for f in fits.values()

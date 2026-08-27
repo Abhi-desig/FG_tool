@@ -52,7 +52,15 @@ Thumbs.db
 
 
 # NOTE on frontend/dist/
-# Ignored during development. At release time the built UI must reach the shop
-# PC, which has no Node. Ship it as a release artifact, or force-add it on a
-# release commit (`git add -f frontend/dist`). See README.md → For developers.
+# Ignored during development, and **force-added on every release commit**. That
+# is the settled policy, not one of two options: the shop PC has no Node, so a
+# plain clone has to be runnable.
+#
+#     cd frontend && npm run build && cd ..
+#     git add -f frontend/dist
+#     uv run python scripts/check_release.py    # must pass before pushing
+#
+# The check is not optional. `519de89` changed ~2,000 lines of frontend and never
+# re-added dist, so the tracked bundle stayed the pre-Phase-5 UI with no AI
+# screens in it at all, and nothing said so. See NEXT.md 0.1.
 .claude/settings.local.json

@@ -1,5 +1,8 @@
+import { useEffect, useState } from "react"
+
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
+import { features } from "@/lib/api"
 import { type Theme, useTheme } from "@/lib/useTheme"
 
 /** The five features plus Settings. Phase 1 ships the first one. */
@@ -30,6 +33,22 @@ interface Props {
 export function Sidebar({ active, onSelect }: Props) {
   const { theme, cycle } = useTheme()
 
+  /**
+   * Which features this install can actually serve.
+   *
+   * A base install has no Pillow, no openpyxl and no cryptography, so those
+   * screens cannot work — and until the routers were mounted lazily the server
+   * would not start at all (NEXT.md 2.6). Showing a screen whose every button
+   * 404s is worse than saying which command installs it.
+   */
+  const [missing, setMissing] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    features()
+      .then((f) => setMissing(f.unavailable))
+      .catch(() => setMissing({}))
+  }, [])
+
   return (
     <nav
       aria-label="Features"
@@ -41,7 +60,8 @@ export function Sidebar({ active, onSelect }: Props) {
       </div>
 
       {FEATURES.map((feature) => {
-        const ready = feature.phase <= READY_THROUGH_PHASE
+        const notInstalled = missing[feature.id]
+        const ready = feature.phase <= READY_THROUGH_PHASE && !notInstalled
         return (
           <Button
             key={feature.id}
@@ -50,15 +70,20 @@ export function Sidebar({ active, onSelect }: Props) {
             // Colour and weight are not enough on their own — a screen reader
             // needs to be told which item is the current one (NEXT.md 3.10).
             aria-current={active === feature.id ? "page" : undefined}
+            title={notInstalled}
             onClick={() => onSelect(feature.id)}
             className="h-auto justify-start px-2 py-2 text-left font-normal"
           >
             <span className="flex w-full items-center justify-between gap-2">
               <span className={ready ? "" : "text-muted-foreground"}>{feature.label}</span>
-              {!ready && (
-                <span className="text-[11px] text-muted-foreground">
-                  Phase {feature.phase}
-                </span>
+              {notInstalled ? (
+                <span className="text-[11px] text-muted-foreground">Not installed</span>
+              ) : (
+                !ready && (
+                  <span className="text-[11px] text-muted-foreground">
+                    Phase {feature.phase}
+                  </span>
+                )
               )}
             </span>
           </Button>

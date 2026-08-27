@@ -86,6 +86,17 @@ export function fontInfo(): Promise<FontInfo> {
   return request<FontInfo>("/api/fonts/info")
 }
 
+/** Which features this install can actually serve. See NEXT.md 2.6. */
+export interface FeatureAvailability {
+  available: string[]
+  /** feature name -> why it is unavailable, including the uv command to fix it. */
+  unavailable: Record<string, string>
+}
+
+export function features(): Promise<FeatureAvailability> {
+  return request<FeatureAvailability>("/api/features")
+}
+
 // --- Phase 2: images ------------------------------------------------------
 
 export type Verdict = "good" | "caution" | "too_small"
@@ -538,10 +549,23 @@ export interface PosterCheck {
     outside_safe_zone: boolean
     extent: { x0: number; y0: number; x1: number; y1: number }
   }[]
-  overflow: { id: string; message: string; measured: boolean }[]
+  overflow: {
+    id: string
+    message: string
+    /** True when the text will actually be trimmed off the printed sheet. */
+    past_trim: boolean
+    measured: boolean
+  }[]
   /** What auto-fit changed. Not a warning — but the operator must be told. */
   fitted: { id: string; message: string; scale: number; lines: number }[]
-  blocks: { id: string; font_px: number; scale: number; lines: string[]; overflows: boolean }[]
+  blocks: {
+    id: string
+    font_px: number
+    scale: number
+    lines: string[]
+    over_box: boolean
+    overflows: boolean
+  }[]
 }
 
 export function posterPresets(): Promise<{
