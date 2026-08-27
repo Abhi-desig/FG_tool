@@ -379,6 +379,7 @@ ai = [
     { name = "keyring" },
 ]
 images = [
+    { name = "numpy" },
     { name = "onnxruntime" },
     { name = "pillow" },
     { name = "rembg" },
@@ -410,6 +411,7 @@ requires-dist = [
     { name = "google-genai", marker = "extra == 'ai'", specifier = ">=2.19.0" },
     { name = "indictranstoolkit", marker = "extra == 'indictrans'", specifier = ">=1.1.1" },
     { name = "keyring", marker = "extra == 'ai'", specifier = ">=25.0" },
+    { name = "numpy", marker = "extra == 'images'", specifier = ">=2.1" },
     { name = "onnxruntime", marker = "extra == 'images'", specifier = ">=1.29.0" },
     { name = "openpyxl", marker = "extra == 'translate'", specifier = ">=3.1.5" },
     { name = "pillow", marker = "extra == 'images'", specifier = ">=12.0" },
