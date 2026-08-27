@@ -64,6 +64,110 @@ def _word_count(text: str) -> int:
 _SHORT_RATIO = 0.7
 _MIN_WORDS_TO_JUDGE = 3
 
+# --- what a word-count heuristic cannot see -------------------------------
+#
+# Measured over a realistic 18-string price list on 2026-08-26. The *only*
+# detector that fired was the word-count check above, on 4 rows. Everything
+# below came back with `needs_attention: false`:
+#
+#   Standee       → "Saint Kitts and Nevis"   (a country)
+#   Brochure      → "breaking"
+#   Visiting Card → "card is visiting"
+#   Focus Digitals→ "Digital Digitals"        (the shop's own name)
+#   300 gsm matte → "300 gsm mathematics"
+#   6x4 feet      → 6x4 മീറ്റ (metre)         (a unit error on a price list)
+#
+# A word-count heuristic *cannot* fire on a one-word cell, and one-word cells
+# are exactly the product names. These checks exist to cover that hole.
+
+# Units the shop actually prices in. A unit that changes between source and
+# output is a defect, not a translation choice — `feet` becoming `metre` on a
+# price list is the kind of error that gets a banner printed at the wrong size.
+_UNIT_WORDS: dict[str, tuple[str, ...]] = {
+    "feet": ("അടി",),
+    "foot": ("അടി",),
+    "ft": ("അടി", "ft"),
+    "inch": ("ഇഞ്ച്",),
+    "inches": ("ഇഞ്ച്",),
+    "metre": ("മീറ്റർ", "മീറ്റ"),
+    "meter": ("മീറ്റർ", "മീറ്റ"),
+    "mm": ("മില്ലിമീറ്റർ", "mm"),
+    "cm": ("സെന്റിമീറ്റർ", "cm"),
+    "gsm": ("gsm", "ജിഎസ്എം"),
+    "litre": ("ലിറ്റർ",),
+    "liter": ("ലിറ്റർ",),
+    "kg": ("കിലോ", "kg"),
+    "kilo": ("കിലോ",),
+    "kilogram": ("കിലോഗ്രാം", "കിലോ"),
+    "gram": ("ഗ്രാം",),
+    "g": ("ഗ്രാം", "g"),
+}
+
+# Every Malayalam unit form, used to spot a *different* unit standing where the
+# expected one should have been.
+#
+# Only consulted when the expected unit is genuinely absent from the output. A
+# broader "the model invented a unit" check was tried and removed: these are
+# substring matches, and Malayalam has no spaces at the boundaries a simple
+# check can see, so `കിലോ` matched inside `കിലോഗ്രാം` and flagged a correct
+# translation of "Price per kilogram".
+_UNIT_TARGETS = frozenset(
+    target for targets in _UNIT_WORDS.values() for target in targets
+)
+
+# Below this many words, the word-count check is structurally blind. Cells this
+# short are flagged for a look instead of assumed safe — see 1.6.
+_SHORT_CELL_WORDS = 2
+
+# Extra words that turn a short cell from "translated" into "reinterpreted".
+# Two is enough to catch a one-word product name becoming a place name, without
+# firing on an ordinary Malayalam compound that needs a second word.
+_RUNAWAY_EXTRA_WORDS = 2
+
+_DIGIT_RUN = re.compile(r"\d+")
+
+
+def _numbers(text: str) -> list[str]:
+    return _DIGIT_RUN.findall(text)
+
+
+# The shop's own vocabulary. A general-purpose 57M-param model has no idea these
+# are print terms and translates them as ordinary English words: measured,
+# `300 gsm matte` came back as "300 gsm mathematics" and `Brochure` as
+# "breaking". Neither has any structural signal — same word count, same digits —
+# so the only way to catch them is to know which words matter here.
+#
+# Not a translation table: these have no fixed Malayalam and the shop's own
+# preference differs by client. It is a list of words that *must* come from the
+# glossary rather than from the model.
+_TRADE_TERMS = frozenset(
+    {
+        "matte", "matt", "gloss", "glossy", "laminate", "lamination", "gsm",
+        "bleed", "trim", "crop", "cmyk", "rgb", "spot", "pantone", "duplex",
+        "brochure", "leaflet", "flyer", "pamphlet", "standee", "standy",
+        "banner", "flex", "vinyl", "sunboard", "foamboard", "acrylic",
+        "letterhead", "visiting card", "business card", "id card", "invoice book",
+        "bill book", "sticker", "label", "danglers", "dangler", "backdrop",
+        "roll-up", "rollup", "canopy", "hoarding", "signage", "led board",
+        "screen printing", "offset", "digital print", "spiral binding",
+        "perfect binding", "saddle stitch", "die cut", "emboss", "foiling",
+        "uv print", "varnish", "art card", "art paper", "ivory", "kraft",
+    }
+)
+
+
+def _trade_terms_in(text: str) -> list[str]:
+    """Print-trade words present in `text`, longest match first."""
+    lowered = text.lower()
+    found = [
+        term
+        for term in _TRADE_TERMS
+        if re.search(rf"(?<![a-z]){re.escape(term)}(?![a-z])", lowered)
+    ]
+    # Longest first so "visiting card" is reported rather than nothing, and so a
+    # message lists the most specific term the operator will recognise.
+    return sorted(found, key=len, reverse=True)
+
 
 @dataclass
 class Row:
@@ -76,27 +180,61 @@ class Row:
     glossary_only: bool = False
     # Terms the model dropped. The operator must place these by hand.
     lost_terms: list[str] = field(default_factory=list)
+    # Placeholder wreckage that was cleaned out of the output. Its presence means
+    # the locked term could not be placed, which is a different problem from the
+    # term merely being missing.
+    debris: list[str] = field(default_factory=list)
+    # A lost term was appended to the tail of the cell rather than placed.
+    term_appended: bool = False
+    # True when no glossary was in force for this row at all (NEXT.md 1.7).
+    no_glossary: bool = False
 
     @property
     def warnings(self) -> list[str]:
-        """Why this row is suspect, in words the operator can act on.
+        """Everything worth saying about this row, most serious first.
+
+        Kept as the flat list the grid has always consumed. `problems` and
+        `checks` split it by how much certainty is behind each note — see
+        `problems`.
+        """
+        return self.problems + self.checks
+
+    @property
+    def problems(self) -> list[str]:
+        """Something is demonstrably wrong. The operator must fix it.
 
         The model fails *confidently* — measured on real output it turned
         "Product" into നിർമ്മാണം ("manufacturing") and dropped "jar" from
         "500 g jar" without any signal. Flagging lost glossary terms alone was
         not enough, so these cheap checks surface the likely omissions too.
+
+        Split from `checks` because a sheet of short product names would
+        otherwise flag almost every row at the same volume, and a grid where
+        everything is urgent is a grid where nothing is.
         """
         notes: list[str] = []
         target = self.translation.strip()
 
         if not target:
-            notes.append("Nothing came back — translate this by hand.")
-            return notes
+            return ["Nothing came back — translate this by hand."]
+
+        # The locked term could not be placed at all. Said first and said
+        # plainly, because the old code reported this row as merely "much
+        # shorter than the English" — the wrong diagnosis entirely.
+        if self.debris:
+            notes.append(
+                "The locked term could not be placed — review this cell. "
+                "Leftover markers were removed from the output."
+            )
 
         if self.lost_terms:
+            where = (
+                " It was added at the end of the cell, out of place — move it."
+                if self.term_appended
+                else ""
+            )
             notes.append(
-                f"The model dropped {', '.join(self.lost_terms)} — it was added at "
-                f"the end. Move it into place."
+                f"The model dropped {', '.join(self.lost_terms)}.{where}"
             )
 
         # Glossary-only rows are exact by construction; the rest are guesses.
@@ -107,6 +245,11 @@ class Row:
             notes.append("Still in English — the model left this untranslated.")
             return notes
 
+        notes.extend(self._unit_warnings(target))
+        notes.extend(self._number_warnings(target))
+
+        # A measured omission, not a suspicion: "500 g jar" came back as
+        # "500 ഗ്രാം" and "Total amount payable" as "മൊത്തം തുക".
         source_words = _word_count(self.source)
         target_words = _word_count(target)
         if (
@@ -121,9 +264,157 @@ class Row:
         return notes
 
     @property
+    def checks(self) -> list[str]:
+        """Nothing is provably wrong, but nothing here can vouch for it either.
+
+        These are the rows NEXT.md 1.6 found: a word-count heuristic cannot fire
+        on a one-word cell, and one-word cells are exactly the product names.
+        `Standee` came back as the Malayalam for "Saint Kitts and Nevis" with
+        `needs_attention: false`. Short no longer means safe.
+        """
+        target = self.translation.strip()
+        if not target or self.glossary_only or not _MALAYALAM.search(target):
+            return []
+
+        notes: list[str] = self._trade_warnings()
+        source_words = _word_count(self.source)
+        target_words = _word_count(target)
+
+        # The mirror of the short check, and the one that catches a product name
+        # turning into a country: "Standee" (1 word) came back as the Malayalam
+        # for "Saint Kitts and Nevis" (4). A proper-noun detector would need a
+        # gazetteer this project is not going to ship; runaway expansion of a
+        # short cell is the same signal for free.
+        if (
+            source_words <= _SHORT_CELL_WORDS
+            and target_words >= source_words + _RUNAWAY_EXTRA_WORDS
+        ):
+            notes.append(
+                f"“{self.source.strip()}” is {source_words} word"
+                f"{'' if source_words == 1 else 's'} in English but "
+                f"{target_words} in Malayalam — the model may have translated it "
+                f"as a name or a place. Check it."
+            )
+
+        # The blind spot. A one- or two-word cell is a product name, nothing
+        # above can judge it, and this is where the worst errors were measured —
+        # "Standee" came back as "Saint Kitts and Nevis".
+        #
+        # Skipped when the cell carries a number or a unit: those *are* checked,
+        # exactly, by `_number_warnings` and `_unit_warnings`, so claiming
+        # "nothing here can check it" about `6x4 feet` would be both false and
+        # the start of alert fatigue.
+        if (
+            source_words <= _SHORT_CELL_WORDS
+            and not self.glossary_terms
+            and not _numbers(self.source)
+            and not self._source_units()
+        ):
+            notes.append(
+                f"“{self.source.strip()}” is a short cell with no approved term — "
+                f"nothing here can check it. Read it, and add a glossary entry "
+                f"so it is right every time."
+            )
+
+        return notes
+
+    def _source_units(self) -> list[str]:
+        """Units named in the English, longest match first."""
+        lowered = self.source.lower()
+        found = [
+            unit
+            for unit in _UNIT_WORDS
+            if re.search(rf"(?<![a-z]){re.escape(unit)}(?![a-z])", lowered)
+        ]
+        return sorted(found, key=len, reverse=True)
+
+    def _unit_warnings(self, target: str) -> list[str]:
+        """Units that changed or disappeared.
+
+        `6x4 feet` came back as `6x4 മീറ്റ` — metre. On a price list that is a
+        quotation for the wrong size of banner.
+        """
+        notes: list[str] = []
+        source_units = self._source_units()
+
+        for unit in source_units:
+            expected = _UNIT_WORDS[unit]
+            if any(form in target for form in expected):
+                continue
+            # The unit is gone. Is a *different* unit standing where it was?
+            intruder = next(
+                (
+                    other
+                    for other in _UNIT_TARGETS
+                    if other in target and other not in expected
+                ),
+                None,
+            )
+            if intruder:
+                notes.append(
+                    f"The unit changed: the English says “{unit}” but the "
+                    f"Malayalam says “{intruder}”. Check the size before quoting."
+                )
+            else:
+                notes.append(
+                    f"The unit “{unit}” is missing from the Malayalam — "
+                    f"put it back."
+                )
+
+        return notes
+
+    def _trade_warnings(self) -> list[str]:
+        """Print-trade words the model translated as ordinary English.
+
+        `300 gsm matte` → "300 gsm mathematics" has the same word count and the
+        same digits as a correct translation. Nothing structural can see it. What
+        *is* knowable is that "matte" is a word this shop cannot afford to leave
+        to a general-purpose model.
+        """
+        covered = {term.lower() for term in self.glossary_terms}
+        uncovered = [
+            term
+            for term in _trade_terms_in(self.source)
+            if not any(term in c or c in term for c in covered)
+        ]
+        if not uncovered:
+            return []
+        listed = ", ".join(f"“{term}”" for term in uncovered[:3])
+        return [
+            f"{listed} {'is a print term' if len(uncovered) == 1 else 'are print terms'} "
+            f"with no approved translation — the model guessed. Add "
+            f"{'it' if len(uncovered) == 1 else 'them'} to this client's glossary."
+        ]
+
+    def _number_warnings(self, target: str) -> list[str]:
+        """Digits are prices and sizes. They must survive exactly."""
+        before, after = _numbers(self.source), _numbers(target)
+        if before == after:
+            return []
+        missing = [n for n in before if n not in after]
+        if missing:
+            return [
+                f"{'A number' if len(missing) == 1 else 'Numbers'} in the English "
+                f"({', '.join(missing)}) {'is' if len(missing) == 1 else 'are'} not "
+                f"in the Malayalam — check the price and the size."
+            ]
+        added = [n for n in after if n not in before]
+        if added:
+            return [
+                f"The Malayalam has a number the English does not "
+                f"({', '.join(added)}) — check it."
+            ]
+        return []
+
+    @property
     def needs_attention(self) -> bool:
         """Rows the operator must look at, not merely may."""
         return bool(self.warnings)
+
+    @property
+    def must_fix(self) -> bool:
+        """Something is demonstrably wrong with this row."""
+        return bool(self.problems)
 
 
 def available_engine() -> str | None:
@@ -158,6 +449,8 @@ def translate_rows(
     direct: dict[int, Row] = {}
     needs_model: list[tuple[int, gl.Masked]] = []
 
+    no_glossary = not terms
+
     for index, source in enumerate(sources):
         masked = gl.mask(source, terms)
         if gl.is_fully_covered(source, terms):
@@ -185,12 +478,17 @@ def translate_rows(
             total=len(sources),
         )
         for (index, masked), output in zip(needs_model, translated, strict=True):
-            restored = gl.restore(output, masked)
+            # The source goes in so `restore` can tell its own mangled markers
+            # from a client's part number — see glossary._debris.
+            restored = gl.restore(output, masked, source=sources[index])
             results[index] = Row(
                 source=sources[index],
                 translation=restored.text,
                 glossary_terms=masked.matched,
                 lost_terms=restored.lost,
+                debris=restored.debris,
+                term_appended=restored.appended,
+                no_glossary=no_glossary,
             )
 
     return [results[i] for i in range(len(sources))]

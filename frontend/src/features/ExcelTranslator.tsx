@@ -27,6 +27,25 @@ import {
 } from "@/lib/api"
 
 /**
+ * Where the last-used client is remembered.
+ *
+ * `sessionStorage`, not `localStorage`: the glossary is the shop's guard against
+ * a weak model, and a client silently remembered from last week is a worse
+ * failure than one that has to be picked again today. It survives navigating
+ * between screens, which is the case that actually bit (NEXT.md 1.7).
+ */
+const LAST_CLIENT_KEY = "focus.lastClientId"
+
+function rememberedClient(): string {
+  try {
+    return sessionStorage.getItem(LAST_CLIENT_KEY) ?? "none"
+  } catch {
+    // Private browsing, or storage disabled. The safe default is no glossary.
+    return "none"
+  }
+}
+
+/**
  * Phase 3. Translate a client spreadsheet, review every row, then export.
  *
  * ROADMAP.md: nothing is written to a file until the operator accepts, and the
@@ -37,7 +56,7 @@ export function ExcelTranslator() {
   const [file, setFile] = useState<File | null>(null)
   const [info, setInfo] = useState<SheetInfo | null>(null)
   const [clients, setClients] = useState<ClientRow[]>([])
-  const [clientId, setClientId] = useState<string>("none")
+  const [clientId, setClientId] = useState<string>(rememberedClient)
   const [job, setJob] = useState<Job | null>(null)
   const [rows, setRows] = useState<ReviewRow[]>([])
   const [edits, setEdits] = useState<Record<string, string>>({})
@@ -76,6 +95,21 @@ export function ExcelTranslator() {
     }
   }, [])
 
+  const chooseClient = useCallback((next: string) => {
+    setClientId(next)
+    try {
+      sessionStorage.setItem(LAST_CLIENT_KEY, next)
+    } catch {
+      // Not being able to remember it is not a reason to refuse the choice.
+    }
+  }, [])
+
+  // A client that no longer exists must not silently mean "no glossary".
+  useEffect(() => {
+    if (clientId === "none" || clients.length === 0) return
+    if (!clients.some((c) => String(c.id) === clientId)) setClientId("none")
+  }, [clients, clientId])
+
   const run = useCallback(async () => {
     if (!file) return
     setError(null)
@@ -103,10 +137,17 @@ export function ExcelTranslator() {
   }, [job, edits, file])
 
   const attention = useMemo(() => rows.filter((r) => r.needs_attention).length, [rows])
+  const mustFix = useMemo(() => rows.filter((r) => r.must_fix).length, [rows])
   const visible = useMemo(
     () => (onlyAttention ? rows.filter((r) => r.needs_attention) : rows),
     [rows, onlyAttention],
   )
+
+  /** Whether the finished job actually had a glossary in force (NEXT.md 1.7). */
+  const glossaryApplied = useMemo(() => {
+    const result = job?.result as unknown as TranslationResult | undefined
+    return result?.glossary_applied ?? true
+  }, [job])
 
   return (
     <div className="space-y-5">
@@ -182,7 +223,7 @@ export function ExcelTranslator() {
 
           <div className="w-[220px] space-y-1.5">
             <Label htmlFor="client">Client glossary</Label>
-            <Select value={clientId} onValueChange={setClientId}>
+            <Select value={clientId} onValueChange={chooseClient}>
               <SelectTrigger id="client">
                 <SelectValue />
               </SelectTrigger>
@@ -203,6 +244,20 @@ export function ExcelTranslator() {
           >
             Translate
           </Button>
+
+          {/*
+            NEXT.md 1.7: translating with the glossary off is the most likely
+            operator error, and it produces exactly the mistranslations the
+            glossary exists to prevent. The safe default stays — but it is no
+            longer silent.
+          */}
+          {clientId === "none" && (
+            <p className="w-full text-sm text-[color:var(--warn)]">
+              No glossary selected — your approved terms will not be applied, and
+              the model will guess at product names. Pick a client above if this
+              sheet belongs to one.
+            </p>
+          )}
           <Button
             variant="ghost"
             onClick={() => {
@@ -223,15 +278,32 @@ export function ExcelTranslator() {
 
       {rows.length > 0 && (
         <>
+          {!glossaryApplied && (
+            <p
+              role="alert"
+              className="rounded-lg border border-[color:var(--warn)]/50 bg-[color:var(--warn)]/10 p-3 text-sm"
+            >
+              This sheet was translated <strong>without a glossary</strong>. Product
+              names and print terms were guessed by the model — read every row
+              marked below before exporting.
+            </p>
+          )}
+
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <p className="text-sm">
                 <strong>{rows.length}</strong> rows
-                {attention > 0 && (
+                {mustFix > 0 && (
+                  <>
+                    {" · "}
+                    <span className="text-destructive">{mustFix} to fix</span>
+                  </>
+                )}
+                {attention - mustFix > 0 && (
                   <>
                     {" · "}
                     <span className="text-[color:var(--warn)]">
-                      {attention} need attention
+                      {attention - mustFix} to check
                     </span>
                   </>
                 )}
@@ -263,8 +335,15 @@ export function ExcelTranslator() {
                 {visible.map((row) => (
                   <tr
                     key={row.key}
+                    // A demonstrable error and a cell that merely cannot be
+                    // verified are not the same thing, and a grid where
+                    // everything is urgent is a grid where nothing is.
                     className={`border-t align-top ${
-                      row.needs_attention ? "bg-[color:var(--warn)]/10" : ""
+                      row.must_fix
+                        ? "bg-destructive/10"
+                        : row.needs_attention
+                          ? "bg-[color:var(--warn)]/10"
+                          : ""
                     }`}
                   >
                     <td className="px-3 py-2">
@@ -297,7 +376,12 @@ export function ExcelTranslator() {
                         className="malayalam h-auto py-1.5"
                         aria-label={`Malayalam for ${row.source}`}
                       />
-                      {row.warnings.map((w) => (
+                      {(row.problems ?? row.warnings).map((w) => (
+                        <p key={w} className="mt-1 text-xs text-destructive">
+                          {w}
+                        </p>
+                      ))}
+                      {(row.checks ?? []).map((w) => (
                         <p key={w} className="mt-1 text-xs text-[color:var(--warn)]">
                           {w}
                         </p>

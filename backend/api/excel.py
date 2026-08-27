@@ -171,6 +171,11 @@ def start_translate(
                     "lost_terms": row.lost_terms,
                     "warnings": row.warnings,
                     "needs_attention": row.needs_attention,
+                    # Split by certainty so the grid can rank a demonstrable
+                    # error above a cell that merely cannot be vouched for.
+                    "problems": row.problems,
+                    "checks": row.checks,
+                    "must_fix": row.must_fix,
                 }
             )
         return {
@@ -178,7 +183,13 @@ def start_translate(
             "rows": grid,
             "unique_strings": len(unique),
             "needs_attention": sum(1 for r in grid if r["needs_attention"]),
+            "must_fix": sum(1 for r in grid if r["must_fix"]),
             "from_glossary": sum(1 for r in grid if r["glossary_only"]),
+            # NEXT.md 1.7: translating with the glossary off is the most likely
+            # operator error and it produces exactly the failures in 1.6, so the
+            # grid says so rather than leaving it to be noticed.
+            "glossary_applied": bool(terms),
+            "glossary_terms": len(terms),
         }
 
     job = jobs.submit("translate", f"Translate — {name}", work)

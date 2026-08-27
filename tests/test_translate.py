@@ -7,6 +7,8 @@ glossary path and the model path, and the flags the review grid depends on.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from backend import models
@@ -175,8 +177,24 @@ def test_good_translation_is_not_flagged() -> None:
 
 
 def test_single_words_are_not_judged_by_length() -> None:
-    """One word cannot be too short, so no false alarm on headers."""
-    assert translate.Row(source="Product", translation="നിർമ്മാണം").warnings == []
+    """One word cannot be too short — the length check must not fire on it."""
+    row = translate.Row(source="Product", translation="നിർമ്മാണം")
+    assert not any("shorter" in note for note in row.warnings)
+
+
+def test_a_single_word_cell_is_flagged_for_a_read_not_as_an_error() -> None:
+    """NEXT.md 1.6: short no longer means safe, but it is not a proven error.
+
+    "Product" really did come back as നിർമ്മാണം — "manufacturing" — with no
+    signal at all. A word-count heuristic structurally cannot fire on one word,
+    and one-word cells are exactly the product names. So it is raised as a
+    *check* rather than a problem: worth reading, not evidence of a defect.
+    """
+    row = translate.Row(source="Product", translation="നിർമ്മാണം")
+    assert row.problems == []
+    assert row.must_fix is False
+    assert row.checks, "a one-word cell with no glossary entry must be surfaced"
+    assert row.needs_attention is True
 
 
 def test_glossary_rows_are_never_flagged_for_length() -> None:
@@ -193,3 +211,154 @@ def test_word_count_handles_malayalam_conjuncts() -> None:
     """`\\w+` splits at the virama and inflated the count — see _word_count."""
     assert translate._word_count("500 ഗ്രാം") == 2
     assert translate._word_count("മൂന്ന് ദിവസത്തിനുള്ളിൽ വിടുതൽ") == 3
+
+
+# --- golden review-grid flags ---------------------------------------------
+#
+# NEXT.md 1.6 and 4.2. The measured failure was not that the model is weak —
+# that is known and documented — but that the grid reported these rows as
+# `needs_attention: false`. These pin the detectors against the real output.
+
+GOLDEN_FLAGS = Path(__file__).parent / "golden" / "translate_flags.tsv"
+
+
+def _flag_rows() -> list[tuple[str, str, str, str]]:
+    rows: list[tuple[str, str, str, str]] = []
+    for line in GOLDEN_FLAGS.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        parts = line.split("\t")
+        assert len(parts) >= 3, f"malformed golden row: {line!r}"
+        note = parts[3] if len(parts) > 3 else ""
+        assert parts[2] in {"problem", "check", "clean"}, parts[2]
+        rows.append((parts[0], parts[1], parts[2], note))
+    return rows
+
+
+FLAG_ROWS = _flag_rows()
+
+
+def test_flag_fixture_covers_the_measured_failures() -> None:
+    assert len(FLAG_ROWS) >= 12, f"only {len(FLAG_ROWS)} measured rows"
+    assert any(r[2] == "clean" for r in FLAG_ROWS), "no negative cases"
+
+
+@pytest.mark.parametrize(
+    ("source", "output", "expected", "note"),
+    FLAG_ROWS,
+    ids=[f"{r[0][:18]}-{r[2]}" for r in FLAG_ROWS],
+)
+def test_golden_review_flags(source: str, output: str, expected: str, note: str) -> None:
+    """Every measured mistranslation must be surfaced, at the right severity."""
+    row = translate.Row(source=source, translation=output)
+
+    if expected == "problem":
+        assert row.problems, f"{note}: not flagged as a problem"
+        assert row.must_fix is True
+    elif expected == "check":
+        assert row.checks, f"{note}: nothing surfaced for a cell nothing can verify"
+        assert row.needs_attention is True
+    else:
+        assert row.warnings == [], f"{note}: false alarm — {row.warnings}"
+        assert row.needs_attention is False
+
+
+def test_unit_change_is_a_problem_not_a_check() -> None:
+    """feet -> metre on a price list is a quotation for the wrong banner."""
+    row = translate.Row(source="6x4 feet", translation="6x4 മീറ്റ")
+    assert any("unit changed" in note.lower() for note in row.problems)
+
+
+def test_a_dropped_number_is_flagged() -> None:
+    """Digits are prices and sizes; they must survive exactly."""
+    row = translate.Row(source="Banner 6x4 at 250 each", translation="ബാനർ 6x4")
+    assert any("250" in note for note in row.problems)
+
+
+def test_trade_terms_are_flagged_when_the_glossary_does_not_cover_them() -> None:
+    """300 gsm matte -> "300 gsm mathematics" has no structural signal at all."""
+    row = translate.Row(source="300 gsm matte", translation="300 ജിഎസ്എം ഗണിതം")
+    assert any("matte" in note for note in row.checks)
+
+
+def test_trade_terms_covered_by_the_glossary_are_not_flagged() -> None:
+    row = translate.Row(
+        source="Standee 6x4 feet",
+        translation="സ്റ്റാൻഡി 6x4 അടി",
+        glossary_terms=["Standee"],
+    )
+    assert row.warnings == []
+
+
+# --- glossary debris (NEXT.md 0.3) ---------------------------------------
+
+
+def test_mangled_placeholder_debris_never_reaches_the_output() -> None:
+    """The exact failure that reached a client's spreadsheet.
+
+    Source `Roll-up standee with stand, 2x6 ft`, glossary `Standee →
+    സ്റ്റാൻഡി`. The 57M model exploded `X0X` into `X-px X X X`, dropping the
+    digit, so `_PLACEHOLDER_RE` matched nothing and cell B6 was exported as:
+
+        X-px X X X നിലവിലുളള റോൾ x 2x6 x സ്റ്റാൻഡി
+    """
+    t = terms({"Standee": "സ്റ്റാൻഡി"})
+    source = "Roll-up standee with stand, 2x6 ft"
+    masked = glossary.mask(source, t)
+    mangled = "X-px X X X നിലവിലുളള റോൾ x 2x6 x"
+
+    restored = glossary.restore(mangled, masked, source=source)
+
+    assert "X-px" not in restored.text
+    assert "X X X" not in restored.text
+    assert restored.debris, "debris was removed but not reported"
+    assert "സ്റ്റാൻഡി" in restored.text, "the approved term must still be present"
+
+
+def test_the_size_in_the_cell_survives_debris_removal() -> None:
+    """`2x6` is a size on a price list. Losing it is worse than the debris.
+
+    A first version of the sweep matched case-insensitively and turned `2x6`
+    into `6`.
+    """
+    t = terms({"Standee": "സ്റ്റാൻഡി"})
+    source = "Roll-up standee with stand, 2x6 ft"
+    masked = glossary.mask(source, t)
+    restored = glossary.restore("X-px X X X റോൾ x 2x6 x", masked, source=source)
+    assert "2x6" in restored.text
+
+
+def test_a_client_part_number_shaped_like_a_placeholder_is_kept() -> None:
+    """The rule that made the debris survivable is still honoured.
+
+    An `X..X` token that *is* in the source is a client's part number and
+    deleting it would be far worse than keeping a stray marker.
+    """
+    t = terms({"Standee": "സ്റ്റാൻഡി"})
+    source = "Cable X0X standee"
+    masked = glossary.mask(source, t)
+    # The model returned our marker (X1X) and left the real part number alone.
+    restored = glossary.restore("X1X കേബിൾ X0X", masked, source=source)
+    assert "X0X" in restored.text, "a client part number was deleted"
+    assert restored.debris == []
+
+
+def test_the_row_says_the_term_could_not_be_placed() -> None:
+    """The old grid said "much shorter than the English" — the wrong diagnosis."""
+    row = translate.Row(
+        source="Roll-up standee with stand, 2x6 ft",
+        translation="നിലവിലുളള റോൾ x 2x6 x സ്റ്റാൻഡി",
+        lost_terms=["സ്റ്റാൻഡി"],
+        debris=["X-px", "X X X"],
+        term_appended=True,
+    )
+    joined = " ".join(row.problems)
+    assert "could not be placed" in joined
+    assert "end of the cell" in joined, "an appended term must say it was appended"
+
+
+def test_restore_without_a_source_leaves_everything_alone() -> None:
+    """No source means no way to tell debris from a part number. Touch nothing."""
+    masked = glossary.Masked(text="X0X", terms={0: "സ്റ്റാൻഡി"}, source="")
+    restored = glossary.restore("X X X", masked, source="")
+    assert restored.debris == []

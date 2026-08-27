@@ -1,0 +1,30 @@
+# Golden review-grid flags: real model output that must not pass silently.
+#
+# source <TAB> malayalam_output <TAB> expected <TAB> back_translation / note
+#
+# expected is one of:
+#   problem  — demonstrably wrong; the operator must fix it
+#   check    — nothing can vouch for it; the operator must read it
+#   clean    — must raise nothing at all
+#
+# MEASURED. Every `problem` and `check` row is real output from
+# opus-mt-en-ml over a realistic 18-string price list, recorded in NEXT.md 1.6
+# on 2026-08-26. At the time, the ONLY detector that fired was a word-count
+# heuristic, on 4 rows — every row below came back `needs_attention: false`.
+#
+# Why these are the hard cases: a word-count heuristic cannot fire on a
+# one-word cell, and one-word cells are exactly the product names. The `clean`
+# rows exist to stop the fix from flagging everything, which would be the same
+# failure wearing the opposite coat.
+Standee	സെന്റ് കിറ്റ്സ് ആൻഡ് നെവിസ്	check	"Saint Kitts and Nevis" — a product name became a country
+Brochure	തകർച്ച	check	"breaking"
+Visiting Card	കാർഡ് സന്ദർശിക്കുന്നു	check	"card is visiting"
+Focus Digitals	ഡിജിറ്റൽ ഡിജിറ്റൽസ്	check	"Digital Digitals" — the shop's own name
+300 gsm matte	300 ജിഎസ്എം ഗണിതം	check	"300 gsm mathematics"
+6x4 feet	6x4 മീറ്റ	problem	feet -> metre: a unit error on a price list
+Product	നിർമ്മാണം	check	"manufacturing"
+500 g jar	500 ഗ്രാം	problem	"jar" dropped outright
+Total amount payable	മൊത്തം തുക	problem	three words to two
+Price per kilogram	ഒരു കിലോഗ്രാം വില	clean	correct, and must not trip the unit check
+Onam wishes	ഓണം ആശംസകൾ	check	correct, but a 2-word cell nothing can verify
+6x4 feet	6x4 അടി	clean	correct unit, must not fire

@@ -325,8 +325,14 @@ export interface ReviewRow {
   glossary_terms: string[]
   glossary_only: boolean
   lost_terms: string[]
+  /** `problems` then `checks`, flat — kept for anything reading the old shape. */
   warnings: string[]
   needs_attention: boolean
+  /** Demonstrably wrong: a dropped term, a changed unit, a missing number. */
+  problems: string[]
+  /** Nothing can vouch for it — chiefly short cells. See features/translate.py. */
+  checks: string[]
+  must_fix: boolean
 }
 
 export interface TranslationResult {
@@ -334,7 +340,11 @@ export interface TranslationResult {
   rows: ReviewRow[]
   unique_strings: number
   needs_attention: number
+  must_fix: number
   from_glossary: number
+  /** False when the sheet was translated with no glossary in force. */
+  glossary_applied: boolean
+  glossary_terms: number
 }
 
 export interface EngineRow {
