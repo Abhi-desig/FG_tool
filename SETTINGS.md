@@ -173,8 +173,16 @@ prompt_versions  (id PK, prompt_id FK, body, saved_at)
 preferences      (key PK, value)
 clients          (id PK, name, archived)
 glossary         (id PK, client_id FK, source_term, target_term, notes)
+corrections      (id PK, client_id FK NULLABLE, source, source_norm, target,
+                  origin, learned_from, updated_at)          -- ADR-029
 jobs             (id PK, feature, model, cost_paise, status, created_at)
 ```
+
+`corrections` is whole-cell recall, and deliberately **not** the glossary: the glossary masks a
+*phrase* inside a sentence, this remembers an entire cell the operator already approved so the next
+sheet fills it in offline and free. `client_id IS NULL` means shop-wide; a client-scoped row
+overrides it. Two partial unique indexes rather than one constraint, because SQLite treats NULLs as
+distinct. See [ADR-029](DECISIONS.md).
 
 `jobs` backs the spend tracker and the history view. It stores **metadata and paths, never copies of
 client files** ([SECURITY.md](SECURITY.md)).
@@ -200,6 +208,13 @@ GET    /api/settings/clients
 POST   /api/settings/clients
 GET    /api/settings/clients/{id}/glossary
 PUT    /api/settings/clients/{id}/glossary
+
+GET    /api/corrections?client_id=&q=&limit=&offset=
+PUT    /api/corrections                      ← {client_id, corrections:[{source, target}]}
+DELETE /api/corrections/{id}
+POST   /api/corrections/import               ← multipart .xlsx, two columns
+GET    /api/corrections/export               → .xlsx
+POST   /api/corrections/forget-job           ← {job_id}   undoes one export's learning
 
 GET    /api/settings/spend?month=
 ```

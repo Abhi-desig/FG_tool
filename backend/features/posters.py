@@ -107,14 +107,38 @@ DEFAULT_FONT_ASCII = fonts.DEFAULT_FONT  # ML-TTKarthika
 
 # The woff2 the UI already ships. Embedded into the exported SVG so the
 # deliverable does not depend on the font being installed — see `_font_face`.
-UNICODE_FONT_FILE = config.ROOT / "frontend" / "public" / "fonts" / "NotoSansMalayalam.woff2"
+#
+# `dist` first, `public` second, and the order matters on the shop PC: a
+# packaged install ships only the built `frontend/dist` (there is no Node there
+# and no source tree), so pointing at `public` alone made `_font_face` return
+# "" and the exported SVG carry no embedded font at all — silently, and only
+# discoverable by opening the file in CorelDRAW. `public` is kept as the
+# fallback because that is where it lives while developing.
+_FONT_CANDIDATES = (
+    config.ROOT / "frontend" / "dist" / "fonts" / "NotoSansMalayalam.woff2",
+    config.ROOT / "frontend" / "public" / "fonts" / "NotoSansMalayalam.woff2",
+)
+UNICODE_FONT_FILE = next(
+    (path for path in _FONT_CANDIDATES if path.exists()), _FONT_CANDIDATES[-1]
+)
 
 # How small auto-fit may shrink a block before it stops reading as the size the
 # operator asked for. Below this the text wraps instead.
 MIN_FIT_SCALE = 0.6
 
-# Line spacing as a multiple of font size, for wrapped blocks.
+# Default line spacing as a multiple of font size. A block may override it with
+# its own `leading`; this stays the value everything falls back to, and
+# `frontend/src/lib/textFit.ts` mirrors it — the two are pinned to each other by
+# `test_both_copies_of_the_fitter_use_the_same_constants`.
 LINE_HEIGHT = 1.25
+
+# Bounds for the per-block typography, mirrored in `features/styles.py`.
+MIN_SIZE_FRACTION = 0.01
+MAX_SIZE_FRACTION = 0.40
+MIN_LEADING = 0.8
+MAX_LEADING = 3.0
+MIN_TRACKING = -0.05
+MAX_TRACKING = 0.5
 
 
 @dataclass
@@ -127,13 +151,23 @@ class TextBlock:
     y: float = 0.1
     width: float = 0.8
     size: str = "medium"
+    # Overrides `size` when set: text height as a fraction of canvas height.
+    # None means "use the bucket", so every poster made before this existed
+    # renders byte-identically.
+    size_fraction: float | None = None
     weight: Weight = "regular"
+    # Letter spacing in ems, and line spacing as a multiple of font size.
+    tracking: float = 0.0
+    leading: float = LINE_HEIGHT
     colour: str = "#ffffff"
     align: Align = "centre"
     # Malayalam only: how this text should be carried into the SVG.
     mode: TextMode = "unicode"
     # A dark rule behind light text, for photos too busy to read against.
     shadow: bool = True
+    # "as-typed" or "upper". Applied to the Unicode text and never to the ASCII
+    # — see `cased`.
+    case: str = "as-typed"
     # What this line *is* on the poster. Nothing in this module reads it — it
     # exists so a design style knows which line is the headline when it applies
     # its colours, and so that survives a round trip through auto-placement.
@@ -145,6 +179,17 @@ class TextBlock:
         self.width = min(max(self.width, 0.02), 1.0)
         if self.size not in SIZE_SCALE:
             self.size = "medium"
+        if self.size_fraction is not None:
+            if MIN_SIZE_FRACTION <= self.size_fraction <= MAX_SIZE_FRACTION:
+                pass
+            else:
+                # Out of the printable range falls back to the bucket rather
+                # than clamping to a size nobody chose.
+                self.size_fraction = None
+        self.tracking = min(max(self.tracking, MIN_TRACKING), MAX_TRACKING)
+        self.leading = min(max(self.leading, MIN_LEADING), MAX_LEADING)
+        if self.case not in ("as-typed", "upper"):
+            self.case = "as-typed"
         return self
 
 
@@ -197,7 +242,7 @@ def suggest_colour(image: Image.Image | None, block: TextBlock) -> str:
     x1 = int(min(max(block.x + block.width, 0.0), 1.0) * width)
     y0 = int(min(max(block.y, 0.0), 1.0) * height)
     # A band roughly the height of the text, not a single row.
-    band = max(1, int(SIZE_SCALE.get(block.size, 0.055) * height))
+    band = max(1, int(size_fraction(block) * height))
     y1 = min(height, y0 + band)
 
     if x1 <= x0 or y1 <= y0:
@@ -381,6 +426,33 @@ def _font_family(block: TextBlock) -> str:
     return f"{DEFAULT_FONT_UNICODE}, sans-serif"
 
 
+def size_fraction(block: TextBlock) -> float:
+    """Text height as a fraction of canvas height.
+
+    One expression, in one place, so nothing re-derives the bucket/override
+    rule. Mirrored by `sizeFraction` in `frontend/src/lib/textFit.ts`.
+    """
+    if block.size_fraction is not None:
+        return block.size_fraction
+    return SIZE_SCALE.get(block.size, 0.055)
+
+
+def cased(text: str, case: str) -> str:
+    """Apply the block's text case.
+
+    **Order is load-bearing.** This runs on the Unicode text, *before*
+    `fonts.unicode_to_ascii`. In `ascii` mode the string is ML-TTKarthika byte
+    codes, where `.upper()` selects entirely different glyphs and would put
+    silent garbage on a client's printed poster. Malayalam is unicameral, so
+    upper-casing it is a no-op and safe.
+
+    Done here in Python (and in `applyCase` in the browser) rather than with CSS
+    `text-transform`, so the DOM preview, the PNG proof and the SVG all draw the
+    same characters — and so the width measurement measures what is drawn.
+    """
+    return text.upper() if case == "upper" else text
+
+
 def _text_for(block: TextBlock) -> str:
     """The characters that actually go into the SVG.
 
@@ -388,9 +460,10 @@ def _text_for(block: TextBlock) -> str:
     selection, so the byte order is the visual order — no shaping engine is
     needed by anything downstream.
     """
+    text = cased(block.text, block.case)
     if block.mode != "ascii":
-        return block.text
-    return fonts.unicode_to_ascii(block.text)
+        return text
+    return fonts.unicode_to_ascii(text)
 
 
 def _anchor(align: Align) -> tuple[str, float]:
@@ -496,11 +569,21 @@ def render_svg(
         # SVG y is the baseline, so drop by roughly a cap height.
         y = block.y * height + font_px * 0.8
         weight = "700" if block.weight == "bold" else "400"
+        # Emitted only when it is actually set, so a poster made before
+        # tracking existed exports byte-identically. CorelDRAW's SVG import is
+        # not documented to honour `letter-spacing`; the alternative — one
+        # <tspan dx> per character — would always round-trip but destroys the
+        # plain <text> element the whole export exists to produce. Default is 0.
+        spacing = (
+            f' letter-spacing="{block.tracking * font_px:.2f}"'
+            if block.tracking
+            else ""
+        )
         common = (
             f'x="{x:.1f}" y="{y:.1f}" '
             f'font-family="{html.escape(_font_family(block))}" '
             f'font-size="{font_px:.1f}" font-weight="{weight}" '
-            f'text-anchor="{anchor}"'
+            f'text-anchor="{anchor}"{spacing}'
         )
 
         # One <tspan> per wrapped line. A single-line block emits its text
@@ -510,7 +593,7 @@ def render_svg(
         else:
             body = "".join(
                 f'<tspan x="{x:.1f}" '
-                f'dy="{0 if i == 0 else font_px * LINE_HEIGHT:.1f}">'
+                f'dy="{0 if i == 0 else font_px * block.leading:.1f}">'
                 f"{html.escape(_line_text(block, line))}</tspan>"
                 for i, line in enumerate(fitted.lines)
             )
@@ -738,12 +821,22 @@ _DEFAULT_ADVANCE_EM = 0.55
 _ESTIMATE_MARGIN = 1.15
 
 
-def _advance_em(text: str) -> float:
-    """Estimated width of `text` in ems."""
-    return sum(
+def _advance_em(text: str, tracking: float = 0.0) -> float:
+    """Estimated width of `text` in ems, letter spacing included.
+
+    Tracking is *added*, never measured: Canvas2D `letterSpacing` is not
+    universally available and Pillow here has no shaping engine at all, so an
+    arithmetic rule is the only way the browser's fitter and this one can agree
+    by construction.
+
+    Multiplied by the full character count, not count − 1: CSS and SVG both add
+    letter spacing after every character including the last.
+    """
+    natural = sum(
         _ADVANCE_EM.get(unicodedata.category(character), _DEFAULT_ADVANCE_EM)
         for character in text
     )
+    return natural + tracking * len(text)
 
 
 def estimate_text_width(block: TextBlock, canvas: Canvas, font_px: float | None = None) -> float:
@@ -754,8 +847,8 @@ def estimate_text_width(block: TextBlock, canvas: Canvas, font_px: float | None 
     not have.
     """
     if font_px is None:
-        font_px = SIZE_SCALE.get(block.size, 0.055) * canvas.height_px
-    return _advance_em(_text_for(block)) * font_px / canvas.width_px
+        font_px = size_fraction(block) * canvas.height_px
+    return _advance_em(_text_for(block), block.tracking) * font_px / canvas.width_px
 
 
 @dataclass(frozen=True)
@@ -781,7 +874,7 @@ class Fitted:
     height: float
 
 
-def _wrap_to(text: str, limit_em: float) -> list[str]:
+def _wrap_to(text: str, limit_em: float, tracking: float = 0.0) -> list[str]:
     """Break on spaces so no line exceeds `limit_em`.
 
     A single word wider than the limit is kept whole rather than split — a
@@ -796,7 +889,7 @@ def _wrap_to(text: str, limit_em: float) -> list[str]:
     current = ""
     for word in words:
         candidate = f"{current} {word}".strip()
-        if current and _advance_em(candidate) > limit_em:
+        if current and _advance_em(candidate, tracking) > limit_em:
             lines.append(current)
             current = word
         else:
@@ -822,9 +915,17 @@ def fit_block(
     supplied it replaces the estimate entirely, which is why the designer's
     on-screen fit and the exported SVG agree.
     """
-    requested_px = SIZE_SCALE.get(block.size, 0.055) * canvas.height_px
+    requested_px = size_fraction(block) * canvas.height_px
+    # Cased once, here, and used for every wrap and every returned line — so
+    # `_line_text` never re-cases and the two can never disagree.
+    source = cased(block.text, block.case)
     text = _text_for(block)
-    total_em = measured_em if measured_em is not None else _advance_em(text)
+    leading = block.leading
+    # A supplied measurement already includes tracking and case: the browser
+    # measures the string it will actually draw. See `measureBlocks`.
+    total_em = (
+        measured_em if measured_em is not None else _advance_em(text, block.tracking)
+    )
 
     # The box, and the safe zone, whichever bites first. A block may not be
     # rescued by growing past the trim.
@@ -845,18 +946,18 @@ def fit_block(
 
     if total_em <= 0:
         return Fitted(
-            id=block.id, font_px=requested_px, scale=1.0, lines=[block.text],
+            id=block.id, font_px=requested_px, scale=1.0, lines=[source],
             shrunk=False, wrapped=False, over_box=False, overflows=False, width=0.0,
-            height=requested_px * LINE_HEIGHT / canvas.height_px,
+            height=requested_px * leading / canvas.height_px,
         )
 
     # 1. Fits as it is.
     if total_em * requested_px <= limit_px:
         return Fitted(
-            id=block.id, font_px=requested_px, scale=1.0, lines=[block.text],
+            id=block.id, font_px=requested_px, scale=1.0, lines=[source],
             shrunk=False, wrapped=False, over_box=False, overflows=False,
             width=total_em * requested_px / canvas.width_px,
-            height=requested_px * LINE_HEIGHT / canvas.height_px,
+            height=requested_px * leading / canvas.height_px,
         )
 
     # 2. Shrink on one line, if that keeps it legible.
@@ -864,10 +965,10 @@ def fit_block(
     if scale >= MIN_FIT_SCALE:
         font_px = requested_px * scale
         return Fitted(
-            id=block.id, font_px=font_px, scale=scale, lines=[block.text],
+            id=block.id, font_px=font_px, scale=scale, lines=[source],
             shrunk=True, wrapped=False, over_box=False, overflows=False,
             width=total_em * font_px / canvas.width_px,
-            height=font_px * LINE_HEIGHT / canvas.height_px,
+            height=font_px * leading / canvas.height_px,
         )
 
     # 3. Wrap. Take the largest size at or above the floor whose lines all fit,
@@ -876,15 +977,17 @@ def fit_block(
     for step in range(0, 41):
         trial = 1.0 - step * (1.0 - MIN_FIT_SCALE) / 40
         font_px = requested_px * trial
-        lines = _wrap_to(block.text, limit_px / font_px)
-        widest = max(_advance_em(_line_text(block, line)) for line in lines)
+        lines = _wrap_to(source, limit_px / font_px, block.tracking)
+        widest = max(
+            _advance_em(_line_text(block, line), block.tracking) for line in lines
+        )
         if widest * font_px <= limit_px:
             return Fitted(
                 id=block.id, font_px=font_px, scale=trial, lines=lines,
                 shrunk=trial < 1.0, wrapped=len(lines) > 1,
                 over_box=False, overflows=False,
                 width=widest * font_px / canvas.width_px,
-                height=len(lines) * font_px * LINE_HEIGHT / canvas.height_px,
+                height=len(lines) * font_px * leading / canvas.height_px,
             )
 
     # 4. A single word wider than the box at the smallest allowed size.
@@ -895,8 +998,8 @@ def fit_block(
     # the printed sheet, and no amount of dragging helps. Only the second is
     # worth blocking an export over.
     font_px = requested_px * MIN_FIT_SCALE
-    lines = _wrap_to(block.text, limit_px / font_px)
-    widest = max(_advance_em(_line_text(block, line)) for line in lines)
+    lines = _wrap_to(source, limit_px / font_px, block.tracking)
+    widest = max(_advance_em(_line_text(block, line), block.tracking) for line in lines)
     width = widest * font_px / canvas.width_px
 
     safe_fraction = 1 - 2 * inset_x
@@ -908,12 +1011,21 @@ def fit_block(
         shrunk=True, wrapped=len(lines) > 1,
         over_box=True, overflows=width > safe_fraction,
         width=width,
-        height=len(lines) * font_px * LINE_HEIGHT / canvas.height_px,
+        # Per-block leading feeds `text_extent` and therefore the safe-zone
+        # check: raising it on a bottom-anchored line can newly push a poster
+        # past the trim. That is correct — the text really does reach further —
+        # but it will read as a regression, so it is said out loud here.
+        height=len(lines) * font_px * leading / canvas.height_px,
     )
 
 
 def _line_text(block: TextBlock, line: str) -> str:
-    """One wrapped line, in the characters that will actually be drawn."""
+    """One wrapped line, in the characters that will actually be drawn.
+
+    Case is deliberately *not* applied here: `fit_block` cases the whole string
+    before wrapping, so the lines arriving here are already cased. Doing it
+    again would be harmless for Unicode and wrong for ASCII.
+    """
     if block.mode != "ascii":
         return line
     return fonts.unicode_to_ascii(line)

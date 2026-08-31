@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
+import { useConfirm } from "@/lib/useConfirm"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -27,6 +28,7 @@ import {
  * leak into client B's catalogue (ROADMAP.md Phase 3).
  */
 export function GlossaryManager() {
+  const { pending, confirm } = useConfirm()
   const [clients, setClients] = useState<ClientRow[]>([])
   const [active, setActive] = useState<string>("")
   const [terms, setTerms] = useState<GlossaryTerm[]>([])
@@ -81,6 +83,9 @@ export function GlossaryManager() {
 
   const remove = async (id?: number) => {
     if (!active || id == null) return
+    // A locked term is the shop's own decision about a client's wording, and
+    // deleting one silently un-fixes every future sheet.
+    if (!confirm(id)) return
     setTerms(await deleteTerm(Number(active), id))
   }
 
@@ -179,7 +184,7 @@ export function GlossaryManager() {
                         className="h-7 px-2 text-xs"
                         onClick={() => void remove(t.id)}
                       >
-                        Remove
+                        {pending === t.id ? "Click again" : "Remove"}
                       </Button>
                     </td>
                   </tr>

@@ -53,6 +53,11 @@ indictrans = [
 ]
 ai = [
     "google-genai>=2.19.0",
+    # Checks the Malayalam the offline model produced, before the operator sees
+    # it. Sheets of names and addresses are almost all proper nouns, which
+    # opus-mt fabricates rather than transliterates — see ADR-018 and
+    # `features/verify.py`. MIT, and pulls httpx/pydantic, both already here.
+    "anthropic>=1.0",
     "keyring>=25.0",
     "cryptography>=44.0",
 ]

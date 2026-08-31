@@ -26,11 +26,12 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from backend import db
+from backend.budget import MONTHLY_BUDGET_PAISE, OverBudget, budget_status, ensure_within
 from backend.features import prompts, styles
 
 log = logging.getLogger(__name__)
 
-Feature = Literal["photo-edit", "poster-artwork", "poster-layout"]
+Feature = Literal["photo-edit", "poster-artwork", "poster-layout", "poster-copy"]
 
 # --- which model does which job -------------------------------------------
 #
@@ -45,6 +46,7 @@ Feature = Literal["photo-edit", "poster-artwork", "poster-layout"]
 PHOTO_MODEL = "gemini-2.5-flash-image"
 ARTWORK_MODEL = "gemini-2.5-flash-image"
 LAYOUT_MODEL = "gemini-2.5-flash"
+COPY_MODEL = "gemini-2.5-flash"
 
 
 @dataclass(frozen=True)
@@ -107,6 +109,24 @@ ROLES: tuple[Role, ...] = (
         ),
         rate_paise=5,  # negligible, but not free
     ),
+    Role(
+        key="copy",
+        feature="poster-copy",
+        label="Poster wording",
+        description=(
+            "Writes the poster's words from a brief, in English and Malayalam. "
+            "Never draws anything."
+        ),
+        needs_image=False,
+        default=COPY_MODEL,
+        # Deliberately no `-lite` here, unlike layout planning: this one has to
+        # produce correct Malayalam orthography, and dropping to a lighter model
+        # to save five paise is a bad trade on work the shop prints.
+        fallbacks=("gemini-2.5-flash", "gemini-flash-latest", "gemini-2.5-pro"),
+        rate_paise=10,  # ~2x a layout plan: same tiny input, four times the output
+        # No batch rate: `has_batch_discount` then returns False and the batch
+        # toggle stays hidden with no extra UI code.
+    ),
 )
 
 ROLE_BY_KEY = {r.key: r for r in ROLES}
@@ -127,19 +147,8 @@ for _role in ROLES:
     if _role.batch_rate_paise is not None:
         RATES_PAISE[f"{_role.key}:batch"] = _role.batch_rate_paise
 
-MONTHLY_BUDGET_PAISE = 200_000  # ₹2,000
-
-
 class AiError(RuntimeError):
     """Something about the request itself is wrong, before any spend."""
-
-
-class OverBudget(AiError):
-    """The month's budget is used up and no override was given.
-
-    Separate from `AiError` so the API layer can answer with a status the UI can
-    act on — offering the override — rather than a generic refusal.
-    """
 
 
 @dataclass
@@ -155,6 +164,8 @@ class AiResult:
     media_type: str = "image/png"
     text: str | None = None
     layout: dict[str, Any] | None = None
+    # Alternative sets of poster words, each in English and Malayalam.
+    alternatives: list[dict[str, Any]] | None = None
     error: str | None = None
     # What was actually sent, so the operator can see it and tune the template.
     prompt_used: str = ""
@@ -226,28 +237,17 @@ def estimate(feature: Feature, batch: bool) -> dict[str, Any]:
 
 
 def check_budget(feature: Feature, batch: bool, override: bool = False) -> None:
-    """Refuse a paid call once the month's budget is gone.
+    """Refuse a paid Gemini call once the month's budget is gone.
 
     `over_budget` existed and was consumed in exactly one place: the colour of a
     bar in the Settings screen. No paid route consulted it, so `/ai/artwork`,
     `/ai/photo-edit` and `/ai/layout-plan` would spend past ₹2,000 indefinitely
     (NEXT.md 1.1). The budget is now a limit rather than a decoration.
 
-    `override` is the operator's explicit "spend anyway" — this is their shop and
-    their money, so the ceiling must be passable. It just may not be passed by
-    accident.
+    The ceiling itself is in `backend/budget.py` — it is one budget across every
+    paid feature, not one per provider.
     """
-    if override:
-        return
-    status = budget_status()
-    if not status["over_budget"]:
-        return
-    raise OverBudget(
-        f"This month's AI spending has reached ₹{status['spent_rupees']:.2f}, past "
-        f"the ₹{status['budget_rupees']:.0f} budget. Nothing was sent and nothing "
-        f"was charged. Check Google's console for the real figure — this total is "
-        f"an estimate — then tick “spend past the budget” to continue."
-    )
+    ensure_within(override, provider="Google")
 
 
 def is_configured() -> bool:
@@ -842,8 +842,34 @@ _FALLBACK_PLACEMENT: dict[str, dict[str, Any]] = {
 }
 
 
+# A run of digits, with the punctuation that belongs inside one: 40%, 9847
+# 000 000, 23/07/2026, ₹1,499.
+_DIGIT_RUN = re.compile(r"\d[\d\s.,/%₹:-]*\d|\d")
+
+# U+0D00–U+0D7F. `features/verify.py` keeps its own copy for the same purpose;
+# feature modules may not import each other, and one regex is not worth a
+# third home in `config.py`.
+_MALAYALAM = re.compile(r"[ഀ-ൿ]")
+
+
+def _digit_runs(text: str) -> set[str]:
+    """Every number-like run in a string, normalised to its digits alone.
+
+    Compared on digits so "9847 000 000" and "9847000000" are the same number
+    and a reformatting is not reported as a fabrication.
+    """
+    return {
+        "".join(ch for ch in run if ch.isdigit())
+        for run in _DIGIT_RUN.findall(text)
+        if any(ch.isdigit() for ch in run)
+    }
+
+
 def verify_text_unchanged(
-    layout: dict[str, Any], values: dict[str, str]
+    layout: dict[str, Any],
+    values: dict[str, str],
+    *,
+    allowed_digits: str = "",
 ) -> tuple[dict[str, Any], list[str]]:
     """Put the operator's exact words back if the AI altered *or dropped* them.
 
@@ -856,8 +882,19 @@ def verify_text_unchanged(
     returned it under a different `id` — passed silently: the exact failure the
     docstring claimed to prevent (NEXT.md 1.2). Every non-empty input field must
     now appear in the result, or it is re-inserted and said out loud.
+
+    `allowed_digits` turns on a second rule, used only where the model is
+    *writing* text rather than placing it: any number in a block the model
+    authored must appear in the text the operator typed. A fabricated
+    percentage or phone number on a printed poster is a reprint, and this repo
+    has already measured the same failure class in translation — ADR-028
+    records the offline model inventing a "retrieved on June 2, 2019" citation
+    into a member's address.
+
+    Left empty — the layout path — the behaviour is exactly as it always was.
     """
     notes: list[str] = []
+    permitted = _digit_runs(allowed_digits) if allowed_digits else None
     blocks = layout.get("blocks")
     if not isinstance(blocks, list):
         # No usable blocks at all: rebuild from what was typed rather than
@@ -881,6 +918,13 @@ def verify_text_unchanged(
         key = str(block.get("id", ""))
         original = values.get(key)
         if original is None or not original.strip():
+            if permitted is not None:
+                # Text the model wrote itself. Any figure in it has to have come
+                # from the operator; the caller decides what to do about one
+                # that did not.
+                invented = _digit_runs(str(block.get("text", ""))) - permitted
+                if invented:
+                    block["fabricated"] = sorted(invented)[0]
             continue
         if str(block.get("text", "")).strip() != original.strip():
             notes.append(
@@ -910,18 +954,168 @@ def verify_text_unchanged(
     return layout, notes
 
 
+# --- writing the words ------------------------------------------------------
+#
+# ADR-030. The operator gives a brief; the model returns whole alternative sets
+# of poster copy in English and Malayalam; the app still draws every word. The
+# `_NO_LETTERING` rule on every style body is untouched — this role cannot
+# return an image at all (`needs_image=False`).
+
+
+def copy_prompt(values: dict[str, str]) -> str:
+    """Exactly what would be sent. Free and side-effect free, like `artwork_prompt`."""
+    template = prompts.active_prompt("poster-copy")
+    return prompts.render(template["body"], values)
+
+
+def parse_copy(text: str) -> dict[str, Any]:
+    """Read the alternatives, tolerating a code fence. Raises rather than guessing."""
+    cleaned = _FENCE.sub("", text).strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start == -1 or end <= start:
+        raise AiError("The AI did not return any wording.")
+    try:
+        parsed = json.loads(cleaned[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise AiError(f"The wording was not valid JSON: {exc.msg}") from exc
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("alternatives"), list):
+        raise AiError("The AI returned no alternatives.")
+    return parsed
+
+
+def _blocks_ok(blocks: Any) -> bool:
+    return isinstance(blocks, list) and all(isinstance(b, dict) for b in blocks)
+
+
+def write_copy(
+    values: dict[str, str],
+    locked: dict[str, str] | None = None,
+    over_budget_ok: bool = False,
+) -> AiResult:
+    """Write several sets of poster words. Never raises past the caller.
+
+    `locked` are lines the operator has committed to and asked to keep; they are
+    checked on return and put back if the model rewrote or dropped them, reusing
+    the same guard the layout path uses.
+
+    An alternative containing a figure the operator never typed is **dropped**,
+    not repaired: there is no safe way to guess which number was meant, and two
+    good alternatives are a usable screen while one invented "60% OFF" is a
+    reprint.
+    """
+    locked = locked or {}
+    text = copy_prompt(values)
+    model = model_for("copy")
+    result = AiResult(
+        ok=False, feature="poster-copy", model=model, batch=False, prompt_used=text
+    )
+    if not values.get("brief", "").strip():
+        result.error = "Say what the poster is for, and the AI can write it."
+        return result
+
+    try:
+        check_budget("poster-copy", False, over_budget_ok)
+    except OverBudget as exc:
+        result.error = str(exc)
+        return result
+
+    try:
+        response = _client().models.generate_content(model=model, contents=text)
+    except AiError as exc:
+        result.error = str(exc)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        log.warning("copywriting failed: %s", exc)
+        result.error = _friendly(exc)
+        return _record(result)
+
+    try:
+        parsed = parse_copy(_extract_text(response))
+    except AiError as exc:
+        result.error = str(exc)
+        return _record(result)
+
+    # Every digit the operator actually typed. Anything else in the model's own
+    # wording is an invention.
+    allowed = " ".join([*values.values(), *locked.values()])
+
+    kept: list[dict[str, Any]] = []
+    notes: list[str] = []
+    for index, alt in enumerate(parsed["alternatives"]):
+        if not isinstance(alt, dict):
+            continue
+        english, malayalam = alt.get("blocks"), alt.get("blocks_ml")
+        if not _blocks_ok(english) or not _blocks_ok(malayalam):
+            continue
+
+        label = str(alt.get("label") or f"Option {index + 1}")
+        english, english_notes = verify_text_unchanged(
+            {"blocks": english}, locked, allowed_digits=allowed
+        )
+        malayalam, malayalam_notes = verify_text_unchanged(
+            {"blocks": malayalam}, locked, allowed_digits=allowed
+        )
+
+        invented = next(
+            (
+                b["fabricated"]
+                for b in [*english["blocks"], *malayalam["blocks"]]
+                if isinstance(b, dict) and b.get("fabricated")
+            ),
+            None,
+        )
+        if invented:
+            notes.append(
+                f"“{label}” was dropped: it invented the figure {invented}, which "
+                "you never typed."
+            )
+            continue
+
+        # Malayalam that is not in Malayalam script is transliteration, and
+        # transliterated Malayalam on a printed poster reads as a mistake.
+        if not any(_MALAYALAM.search(str(b.get("text", ""))) for b in malayalam["blocks"]):
+            notes.append(f"“{label}” was dropped: its Malayalam came back in the wrong script.")
+            continue
+
+        notes.extend(english_notes)
+        notes.extend(malayalam_notes)
+        kept.append(
+            {
+                "id": str(alt.get("id") or f"a{index + 1}"),
+                "label": label,
+                "blocks": english["blocks"],
+                "blocks_ml": malayalam["blocks"],
+            }
+        )
+
+    result.cost_paise = cost_of("copy", False)
+    result.warnings.extend(notes)
+    if not kept:
+        # A refusal, not a silent empty list. The money is gone either way, so
+        # the spend is still recorded — ADR-023 and ADR-024.
+        result.error = (
+            "None of the wording the AI returned was usable. Your own words are "
+            "untouched — try again, or add more detail to the brief."
+        )
+        return _record(result)
+
+    result.ok = True
+    result.alternatives = kept
+    return _record(result)
+
+
 # --- budget ---------------------------------------------------------------
+#
+# `MONTHLY_BUDGET_PAISE`, `OverBudget` and `budget_status` are re-exported from
+# `backend/budget.py` so existing callers — the API layer and the Settings
+# screen — keep working unchanged. The ceiling is shared with the Excel
+# verifier; the shop has one AI budget, not one per provider.
 
-
-def budget_status(month: str | None = None) -> dict[str, Any]:
-    summary = db.spend_summary(month)
-    spent = int(summary["total_paise"])
-    return summary | {
-        "budget_paise": MONTHLY_BUDGET_PAISE,
-        "spent_rupees": round(spent / 100, 2),
-        "budget_rupees": round(MONTHLY_BUDGET_PAISE / 100, 2),
-        "fraction_used": round(min(spent / MONTHLY_BUDGET_PAISE, 1.0), 4),
-        "over_budget": spent > MONTHLY_BUDGET_PAISE,
-        # An estimate, and the UI must say so — Google's console is the truth.
-        "is_estimate": True,
-    }
+__all__ = [
+    "COPY_MODEL",
+    "MONTHLY_BUDGET_PAISE",
+    "AiError",
+    "AiResult",
+    "OverBudget",
+    "budget_status",
+]

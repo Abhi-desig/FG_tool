@@ -27,7 +27,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from backend import models
+from backend import models, textkey
 from backend.features import glossary as gl
 from backend.jobs import Reporter
 
@@ -178,6 +178,12 @@ class Row:
     glossary_terms: list[str] = field(default_factory=list)
     # True when the glossary alone produced this — no model involved.
     glossary_only: bool = False
+    # True when this whole cell came from the corrections memory: a cell the
+    # operator approved on an earlier sheet. Exact by construction in the same
+    # way `glossary_only` is, and flagged for the same reason — so the review
+    # grid can say why it never reached the model, and so the paid check never
+    # pays to second-guess an answer the operator already gave (ADR-029).
+    from_memory: bool = False
     # Terms the model dropped. The operator must place these by hand.
     lost_terms: list[str] = field(default_factory=list)
     # Placeholder wreckage that was cleaned out of the output. Its presence means
@@ -237,8 +243,8 @@ class Row:
                 f"The model dropped {', '.join(self.lost_terms)}.{where}"
             )
 
-        # Glossary-only rows are exact by construction; the rest are guesses.
-        if self.glossary_only:
+        # Exact by construction; the rest are guesses.
+        if self.glossary_only or self.from_memory:
             return notes
 
         if not _MALAYALAM.search(target):
@@ -273,7 +279,9 @@ class Row:
         `needs_attention: false`. Short no longer means safe.
         """
         target = self.translation.strip()
-        if not target or self.glossary_only or not _MALAYALAM.search(target):
+        if not target or self.glossary_only or self.from_memory:
+            return []
+        if not _MALAYALAM.search(target):
             return []
 
         notes: list[str] = self._trade_warnings()
@@ -433,25 +441,49 @@ def translate_rows(
     terms: list[tuple[str, str]],
     engine: str | None = None,
     reporter: Reporter | None = None,
+    progress_to: float = 0.95,
+    memory: dict[str, str] | None = None,
 ) -> list[Row]:
     """Translate distinct strings, applying the glossary around the model.
 
     Cells the glossary covers entirely never reach the model — that is both
     faster and safer, since a weak model can only make an already-correct term
     worse. A catalogue of product names is mostly this case.
+
+    `memory` is the corrections memory, keyed by `textkey.normalise` — cells the
+    operator approved on an earlier sheet. It is passed in rather than read here
+    because a feature module may not import `db`; the router owns storage and
+    hands this down as plain data, exactly as it already does with `terms`.
+
+    `progress_to` is where this pass leaves the job's bar. It is the whole job
+    on its own, but only the first half when the optional Claude check runs
+    after it — and a bar that reaches 95% and then restarts reads as a fault.
     """
     if not sources:
         return []
 
     engine = engine or available_engine() or "opus-mt-en-ml"
 
-    # Split the work: glossary-only rows need no model at all.
+    # Split the work three ways: remembered and glossary-only rows need no
+    # model at all. Memory is checked first because a whole cell the operator
+    # approved outranks re-deriving that cell from phrase rules, and is free.
+    memory = memory or {}
     direct: dict[int, Row] = {}
+    remembered_count = 0
     needs_model: list[tuple[int, gl.Masked]] = []
 
     no_glossary = not terms
 
     for index, source in enumerate(sources):
+        remembered = memory.get(textkey.normalise(source))
+        if remembered:
+            direct[index] = Row(
+                source=source,
+                translation=remembered,
+                from_memory=True,
+            )
+            remembered_count += 1
+            continue
         masked = gl.mask(source, terms)
         if gl.is_fully_covered(source, terms):
             restored = gl.restore(masked.text, masked)
@@ -465,8 +497,12 @@ def translate_rows(
             needs_model.append((index, masked))
 
     if reporter:
+        already = []
+        if remembered_count:
+            already.append(f"{remembered_count} rows from your corrections")
+        already.append(f"{len(direct) - remembered_count} from the glossary")
         reporter.step(
-            f"{len(direct)} rows from the glossary, {len(needs_model)} to translate…",
+            f"{', '.join(already)}, {len(needs_model)} to translate…",
             0.1,
         )
 
@@ -475,7 +511,7 @@ def translate_rows(
     if needs_model:
         translated = _run_engine(
             engine, [m.text for _, m in needs_model], reporter, done_base=len(direct),
-            total=len(sources),
+            total=len(sources), progress_to=progress_to,
         )
         for (index, masked), output in zip(needs_model, translated, strict=True):
             # The source goes in so `restore` can tell its own mangled markers
@@ -500,6 +536,7 @@ def _run_engine(
     reporter: Reporter | None,
     done_base: int = 0,
     total: int | None = None,
+    progress_to: float = 0.95,
 ) -> list[str]:
     """Load the model, translate in batches, free it."""
     spec = models.spec(engine)
@@ -530,7 +567,8 @@ def _run_engine(
             if reporter:
                 done = done_base + len(outputs)
                 reporter.step(
-                    f"Translating — row {done} of {total}", 0.1 + 0.85 * done / total
+                    f"Translating — row {done} of {total}",
+                    0.1 + (progress_to - 0.1) * done / total,
                 )
 
     if spec.key.startswith("indictrans2"):

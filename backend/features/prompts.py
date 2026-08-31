@@ -56,6 +56,18 @@ SCOPES: tuple[Scope, ...] = (
         required=("headline",),
     ),
     Scope(
+        key="poster-copy",
+        label="Poster wording",
+        description=(
+            "Writes the poster's words from a plain-language brief, in English "
+            "and Malayalam. Returns JSON only — the app still draws every word."
+        ),
+        # `phone` is deliberately absent: the operator's number never leaves the
+        # machine, and the app substitutes it after the call (ADR-030).
+        variables=("brief", "occasion", "tone", "shop", "keep"),
+        required=("brief",),
+    ),
+    Scope(
         key="poster-artwork",
         label="Poster background artwork",
         description="Generates the picture behind the text. No words in the image.",
@@ -75,6 +87,40 @@ SCOPE_KEYS = {s.key: s for s in SCOPES}
 
 # Shipped so the operator opens a working set, not an empty screen.
 SEEDS: dict[str, str] = {
+    "poster-copy": (
+        "You are writing the words for a printed poster for a shop in Kerala.\n"
+        "\n"
+        "What the shop wants: {{brief}}\n"
+        "Occasion: {{occasion}}\n"
+        "Tone: {{tone}}\n"
+        "Shop: {{shop}}\n"
+        "Must stay exactly as written: {{keep}}\n"
+        "\n"
+        "Return ONLY a JSON object, no prose and no code fence, shaped like:\n"
+        '{"alternatives": [\n'
+        '  {"id": "a", "label": "Straight",\n'
+        '   "blocks":    [{"id": "headline", "text": "..."},\n'
+        '                 {"id": "offer",    "text": "..."},\n'
+        '                 {"id": "occasion", "text": "..."}],\n'
+        '   "blocks_ml": [{"id": "headline", "text": "..."},\n'
+        '                 {"id": "offer",    "text": "..."},\n'
+        '                 {"id": "occasion", "text": "..."}]}]}\n'
+        "\n"
+        "Rules:\n"
+        "- Give exactly three alternatives, genuinely different from each other:\n"
+        "  one plain and direct, one warm and festive, one very short.\n"
+        '- "blocks" is English. "blocks_ml" is the same three lines in real\n'
+        "  Malayalam script (Unicode), never Malayalam spelled in English letters.\n"
+        "- NEVER write a number, price, percentage, date or phone number that does\n"
+        "  not appear word for word in the text above. If the shop did not give a\n"
+        "  figure, write the line without one. An invented figure ruins a printed\n"
+        "  poster and the whole alternative will be thrown away.\n"
+        "- Do not write a phone number at all. The app adds the shop's own.\n"
+        '- Anything under "Must stay exactly as written" is copied character for\n'
+        "  character, including spacing and punctuation.\n"
+        "- Poster lines are short. A headline is at most five words.\n"
+        "- You are writing words only. You never describe or draw a picture.\n"
+    ),
     "poster-layout": (
         "You are laying out a print poster for a shop in Kerala.\n"
         "\n"

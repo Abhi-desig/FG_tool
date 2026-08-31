@@ -3,11 +3,20 @@ import { toast } from "sonner"
 
 import { AiModels } from "@/components/AiModels"
 import { ApiKeys } from "@/components/ApiKeys"
+import { CorrectionsManager } from "@/components/CorrectionsManager"
 import { GlossaryManager } from "@/components/GlossaryManager"
 import { PosterStyles } from "@/components/PosterStyles"
 import { PromptLibrary } from "@/components/PromptLibrary"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs"
 import {
   Select,
   SelectContent,
@@ -57,6 +66,27 @@ export function Settings() {
         </p>
       </header>
 
+      <Tabs defaultValue="printing" className="gap-4">
+        <TabsList>
+          <TabsTrigger value="printing">Printing</TabsTrigger>
+          <TabsTrigger value="words">Words</TabsTrigger>
+          <TabsTrigger value="ai">AI &amp; spend</TabsTrigger>
+          <TabsTrigger value="looks">Looks</TabsTrigger>
+        </TabsList>
+
+        {/*
+          `forceMount` on every panel, and hidden by data-state rather than a
+          conditional render. Radix unmounts an inactive tab by default, which
+          would throw away an unsaved style or prompt draft the moment the
+          operator glanced at another tab — the same failure `App.tsx` documents
+          for the feature screens (NEXT.md 0.4), and the one DESIGN.md principle
+          5 forbids.
+        */}
+        <TabsContent
+          value="printing"
+          forceMount
+          className="space-y-5 data-[state=inactive]:hidden"
+        >
       {/* --- Print defaults --- */}
       <section className="space-y-4 rounded-xl border bg-card p-4">
         <h2 className="text-lg font-semibold">Print defaults</h2>
@@ -184,8 +214,16 @@ export function Settings() {
           </>
         )}
       </section>
+        </TabsContent>
 
-      <GlossaryManager />
+        <TabsContent
+          value="words"
+          forceMount
+          className="space-y-5 data-[state=inactive]:hidden"
+        >
+          <GlossaryManager />
+
+          <CorrectionsManager />
 
       {/* --- Translation engine --- */}
       <section className="space-y-3 rounded-xl border bg-card p-4">
@@ -228,13 +266,60 @@ export function Settings() {
         </p>
       </section>
 
-      <ApiKeys />
+        {/*
+          The Claude model for the optional Malayalam check. A setting for the
+          same reason the Gemini names are: providers retire model names, and a
+          name that no longer exists fails partway through a *paid* job. The
+          error message has always told the operator to fix it here — this is
+          what makes that sentence true.
+        */}
+        <section className="space-y-3 rounded-xl border bg-card p-4">
+          <h2 className="text-lg font-semibold">Malayalam check</h2>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="w-[280px] space-y-1.5">
+              <Label htmlFor="verify-model">Model</Label>
+              <Input
+                id="verify-model"
+                value={prefs?.verify_model ?? ""}
+                placeholder="claude-sonnet-5"
+                onChange={(e) => save("verify_model", e.target.value)}
+              />
+            </div>
+            <Button
+              variant="ghost"
+              onClick={() => save("verify_model", "")}
+              disabled={!prefs?.verify_model}
+            >
+              Use the default
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Leave it empty to use whatever this version ships with. Change it only
+            if a check fails saying Anthropic has no such model any more.
+          </p>
+        </section>
+        </TabsContent>
 
-      <AiModels />
+        <TabsContent
+          value="ai"
+          forceMount
+          className="space-y-5 data-[state=inactive]:hidden"
+        >
+          <ApiKeys />
 
-      <PosterStyles />
+          <AiModels />
+        </TabsContent>
 
-      <PromptLibrary />
+        <TabsContent
+          value="looks"
+          forceMount
+          className="space-y-5 data-[state=inactive]:hidden"
+        >
+          <PosterStyles />
+
+          <PromptLibrary />
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

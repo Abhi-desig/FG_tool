@@ -16,7 +16,7 @@ import base64
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend import config, crypto, db
 from backend.features import ai, images, prompts, styles
@@ -101,11 +101,20 @@ def test_key(name: str) -> dict[str, object]:
 
 
 class ModelChoiceIn(BaseModel):
-    """Empty string means "go back to the shipped default"."""
+    """Empty string means "go back to the shipped default".
+
+    Field names are role keys, because `put_ai_models` maps them straight
+    through `ai.PREFERENCE_KEY`. The copy role is spelled `copy_` here and
+    aliased back: a plain `copy` field shadows `BaseModel.copy` and Pydantic
+    warns about it, and the wire name has to keep matching the role key.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
 
     artwork: str | None = Field(default=None, max_length=120)
     photo: str | None = Field(default=None, max_length=120)
     layout: str | None = Field(default=None, max_length=120)
+    copy_: str | None = Field(default=None, max_length=120, alias="copy")
 
 
 @router.get("/ai/models")
@@ -127,7 +136,8 @@ def ai_models(refresh: bool = False) -> dict[str, object]:
 def put_ai_models(body: ModelChoiceIn) -> dict[str, object]:
     updates = {
         ai.PREFERENCE_KEY[role]: (value or "").strip()
-        for role, value in body.model_dump().items()
+        # `by_alias` so the keys are role names — `copy_` would not be one.
+        for role, value in body.model_dump(by_alias=True).items()
         if value is not None
     }
     if not updates:
@@ -230,11 +240,83 @@ def ai_status() -> dict[str, object]:
 
 @router.get("/ai/estimate")
 def ai_estimate(
-    feature: Literal["photo-edit", "poster-artwork", "poster-layout"],
+    feature: Literal["photo-edit", "poster-artwork", "poster-layout", "poster-copy"],
     batch: bool = True,
 ) -> dict[str, object]:
     """Free. Says what a call will cost before the operator commits."""
     return ai.estimate(feature, batch)
+
+
+
+# --- writing the words (ADR-030) -------------------------------------------
+
+
+class CopyIn(BaseModel):
+    """A brief, and the lines the operator has already committed to.
+
+    Every field is bounded for the reason `ArtworkIn` gives: the cost is a flat
+    per-call rate, so an unbounded field grows Google's bill while the budget
+    meter does not move.
+    """
+
+    brief: str = Field(min_length=1, max_length=2000)
+    occasion: str = Field(default="", max_length=200)
+    tone: str = Field(default="", max_length=200)
+    shop: str = Field(default="", max_length=200)
+    # Lines to keep word for word. Sent as "must stay exactly as written",
+    # checked on return, and put back if the model rewrote or dropped them.
+    keep_headline: str = Field(default="", max_length=500)
+    keep_offer: str = Field(default="", max_length=500)
+    keep_occasion: str = Field(default="", max_length=200)
+    # **Never sent to Google.** Held only so the digits in it count as the
+    # operator's own, and substituted locally afterwards.
+    phone: str = Field(default="", max_length=100)
+    over_budget_ok: bool = False
+
+    def locked(self) -> dict[str, str]:
+        pairs = {
+            "headline": self.keep_headline.strip(),
+            "offer": self.keep_offer.strip(),
+            "occasion": self.keep_occasion.strip(),
+        }
+        return {k: v for k, v in pairs.items() if v}
+
+    def values(self) -> dict[str, str]:
+        keep = self.locked()
+        return {
+            "brief": self.brief.strip(),
+            "occasion": self.occasion.strip(),
+            "tone": self.tone.strip(),
+            "shop": self.shop.strip(),
+            "keep": "; ".join(f"{k}: {v}" for k, v in keep.items()),
+        }
+
+
+@router.post("/ai/copy/prompt")
+def copy_prompt(body: CopyIn) -> dict[str, object]:
+    """Exactly what would be sent, and what it costs. Free — nothing is called."""
+    return {
+        "prompt": ai.copy_prompt(body.values()),
+        "estimate": ai.estimate("poster-copy", False),
+    }
+
+
+@router.post("/ai/copy")
+def write_copy(body: CopyIn) -> dict[str, object]:
+    """Write several sets of poster words. A refusal is a 200 — see `_result`."""
+    result = ai.write_copy(
+        body.values(), body.locked(), over_budget_ok=body.over_budget_ok
+    )
+    payload = _result(result)
+    # The operator's own phone, put back locally. It was never in the request to
+    # Google and it is not the model's to invent.
+    if result.alternatives is not None and body.phone.strip():
+        for alt in result.alternatives:
+            for key in ("blocks", "blocks_ml"):
+                blocks = alt.get(key)
+                if isinstance(blocks, list):
+                    blocks.append({"id": "phone", "text": body.phone.strip()})
+    return payload
 
 
 @router.get("/ai/spend")
@@ -269,6 +351,8 @@ def _result(result: ai.AiResult) -> dict[str, object]:
         body["media_type"] = result.media_type
     if result.layout is not None:
         body["layout"] = result.layout
+    if result.alternatives is not None:
+        body["alternatives"] = result.alternatives
     return body
 
 

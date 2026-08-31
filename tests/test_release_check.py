@@ -93,3 +93,56 @@ def test_the_shipped_bundle_contains_the_phase_5_screens() -> None:
     source = "\n".join(b.read_text(encoding="utf-8", errors="replace") for b in bundles)
     for route in ("api/styles", "api/ai/models", "api/features"):
         assert route in source, f"the shipped bundle never calls {route}"
+
+
+# --- the shop PC package ---------------------------------------------------
+
+PACKAGE = ROOT / "scripts" / "package_windows.py"
+
+
+def _load_packager():
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location("package_windows", PACKAGE)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_packager_refuses_the_things_that_must_never_ship() -> None:
+    """CLAUDE.md rule 5 and SECURITY.md. A packaged `.env` or `data.db` would be
+    emailed around, and the operator's own database would be overwritten by ours.
+    """
+    pkg = _load_packager()
+    from pathlib import Path as _Path
+
+    for name in (
+        ".env",
+        "data.db",
+        "data.db-wal",
+        "backend/__pycache__/main.pyc",
+        "models/birefnet-general.onnx",
+        "tests/test_ai.py",
+        "frontend/node_modules/react/index.js",
+        "something.log",
+    ):
+        assert pkg.refused(_Path(name)), f"{name} would have been packaged"
+
+
+def test_the_packager_includes_what_the_shop_pc_cannot_rebuild() -> None:
+    """No Node on that machine, so the built UI and the font map have to travel."""
+    pkg = _load_packager()
+    from pathlib import Path as _Path
+
+    for name in (
+        "backend/main.py",
+        "frontend/dist/index.html",
+        "frontend/dist/fonts/NotoSansMalayalam.woff2",
+        "data/maps/ML-TTKarthika.map",
+    ):
+        assert not pkg.refused(_Path(name)), f"{name} was wrongly excluded"
+    assert "frontend/dist" in pkg.TREES
+    assert "uv.lock" in pkg.FILES

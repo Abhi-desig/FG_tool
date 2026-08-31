@@ -1,7 +1,7 @@
 """SQLite storage. Stdlib `sqlite3`, no ORM — see ADR-009.
 
-The full schema is here — `preferences`, `clients`, `glossary`, `api_keys`,
-`prompts`, `prompt_versions`, `poster_styles` and `ai_spend`. The tables are
+The full schema is here — `preferences`, `clients`, `glossary`, `corrections`,
+`api_keys`, `prompts`, `prompt_versions`, `poster_styles` and `ai_spend`. The tables are
 created together in `init()` rather than per phase: an empty table costs nothing,
 and the alternative was a migration step on a machine with no one to run it.
 
@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from backend import config, crypto
+from backend import config, crypto, textkey
 
 _local = threading.local()
 
@@ -49,6 +49,49 @@ CREATE TABLE IF NOT EXISTS glossary (
 );
 
 CREATE INDEX IF NOT EXISTS glossary_client ON glossary(client_id);
+
+-- Whole-cell recall, and deliberately not the glossary.
+--
+-- The glossary masks a *phrase* inside a sentence (features/glossary.py). This
+-- remembers an entire cell the operator has already approved, so the second
+-- member list never repeats the first one's spelling. A member list is 33,000
+-- cells of proper nouns and the offline model fabricates on them — measured,
+-- ELAVUNKAL VEEDU came back as the Malayalam for "Eucalyptus" (ADR-028) — so
+-- the cheapest correct answer is the one the operator already gave.
+--
+-- `client_id IS NULL` means shop-wide. A house name written by sound is right
+-- for every client, and the shop sees a given co-operative's sheet about once a
+-- year, so a purely per-client memory would be empty exactly when it mattered.
+-- A scoped row overrides the shop-wide one where a trade term genuinely differs
+-- (ADR-029).
+CREATE TABLE IF NOT EXISTS corrections (
+    id           INTEGER PRIMARY KEY,
+    client_id    INTEGER REFERENCES clients(id) ON DELETE CASCADE,
+    -- Kept as it was learned, for the Settings list and the Excel round trip.
+    source       TEXT NOT NULL,
+    -- What lookup matches on: whitespace collapsed and casefolded, because the
+    -- same name arrives as "ELAVUNKAL  VEEDU" one year and "Elavunkal Veedu"
+    -- the next. See backend/textkey.py, which both this module and the
+    -- translator normalise through so they cannot drift apart.
+    source_norm  TEXT NOT NULL,
+    target       TEXT NOT NULL,
+    -- 'operator' when they typed it, 'claude-kept' when they exported a paid
+    -- correction unchanged. Decides nothing; it is how the operator tells, a
+    -- year later, where a wrong entry came from.
+    origin       TEXT NOT NULL DEFAULT 'operator',
+    -- The job that taught it, so one bad export can be undone in full.
+    learned_from TEXT NOT NULL DEFAULT '',
+    updated_at   TEXT NOT NULL
+);
+
+-- Two partial indexes, not one constraint: SQLite treats NULLs as distinct in a
+-- UNIQUE constraint, so `UNIQUE (client_id, source_norm)` would happily store
+-- the same shop-wide string a thousand times.
+CREATE UNIQUE INDEX IF NOT EXISTS corrections_global
+    ON corrections(source_norm) WHERE client_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS corrections_scoped
+    ON corrections(client_id, source_norm) WHERE client_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS corrections_job ON corrections(learned_from);
 
 -- Ciphertext only. The plaintext key never lands in this file, and never
 -- crosses the API boundary to the browser (SECURITY.md).
@@ -134,6 +177,18 @@ DEFAULTS: dict[str, str] = {
     "ai_model_layout": "",
     "ai_model_artwork": "",
     "ai_model_photo": "",
+    # Poster wording (ADR-030). Missing from this list, `ai.resolve_models`
+    # would raise the moment Google retired any model, because it writes every
+    # role's preference back after repairing a stale name.
+    "ai_model_copy": "",
+    # Which Claude model checks the Malayalam, for the same reason as above.
+    # `features/verify.py` has read this key since it shipped, but it was never
+    # listed here — so `set_preferences` refused it, `get_preferences` filtered
+    # it out, and the model was permanently the hardcoded default. That is the
+    # exact stale-model failure the module's own comment says it exists to
+    # prevent, and `verify.friendly_error` told the operator to fix it "in
+    # Settings" where no such control existed. Empty means the shipped default.
+    "verify_model": "",
 }
 
 
@@ -289,9 +344,213 @@ def delete_term(client_id: int, term_id: int) -> list[dict[str, Any]]:
     return get_glossary(client_id)
 
 
+# --- corrections memory ----------------------------------------------------
+#
+# ADR-029. A cell the operator has already approved is filled from here before
+# the model or the paid check ever runs, so the same spelling mistake cannot
+# recur and cannot be charged for twice.
+
+# Matches `excel.MAX_CELL_CHARS`. A source longer than a cell can hold could
+# never be looked up, so storing it would only ever be noise.
+MAX_CORRECTION_CHARS = 5000
+
+
+def _correction_row(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "client_id": row["client_id"],
+        "source": row["source"],
+        "target": row["target"],
+        "origin": row["origin"],
+        "learned_from": row["learned_from"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _scope_clause(client_id: int | None) -> tuple[str, tuple[Any, ...]]:
+    """The WHERE fragment for one scope.
+
+    Branching rather than passing a sentinel: `client_id = NULL` is never true
+    in SQL, so a single parameterised clause would silently return nothing for
+    the shop-wide scope.
+    """
+    if client_id is None:
+        return "client_id IS NULL", ()
+    return "client_id = ?", (client_id,)
+
+
+def get_corrections(
+    client_id: int | None = None,
+    query: str = "",
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """One scope's remembered cells, newest first.
+
+    Always paginated. A shop that has exported a few member lists will have tens
+    of thousands of these, and sending them all to the browser to filter there
+    is the obvious version of this that does not survive its first real sheet.
+    """
+    where, params = _scope_clause(client_id)
+    if query.strip():
+        like = f"%{query.strip()}%"
+        where += " AND (source LIKE ? OR target LIKE ?)"
+        params += (like, like)
+    with cursor() as cur:
+        return [
+            _correction_row(r)
+            for r in cur.execute(
+                f"SELECT * FROM corrections WHERE {where} "
+                "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+                (*params, max(1, min(limit, 1000)), max(0, offset)),
+            )
+        ]
+
+
+def count_corrections(client_id: int | None = None, query: str = "") -> int:
+    where, params = _scope_clause(client_id)
+    if query.strip():
+        like = f"%{query.strip()}%"
+        where += " AND (source LIKE ? OR target LIKE ?)"
+        params += (like, like)
+    with cursor() as cur:
+        row = cur.execute(
+            f"SELECT COUNT(*) AS n FROM corrections WHERE {where}", params
+        ).fetchone()
+    return int(row["n"])
+
+
+def corrections_map(client_id: int | None = None) -> dict[str, str]:
+    """Everything that applies to this sheet, keyed by `textkey.normalise`.
+
+    One query, not two: shop-wide rows are ordered first and the client's own
+    rows last, so building the dict in order lets a scoped correction overwrite
+    the global one for the same cell. This is the hot path — it runs once per
+    sheet and is then consulted per cell — so it is deliberately a plain dict
+    lookup rather than a query per row.
+    """
+    with cursor() as cur:
+        if client_id is None:
+            rows = cur.execute(
+                "SELECT source_norm, target FROM corrections WHERE client_id IS NULL"
+            )
+        else:
+            rows = cur.execute(
+                "SELECT source_norm, target FROM corrections "
+                "WHERE client_id IS NULL OR client_id = ? "
+                "ORDER BY (client_id IS NULL) DESC",
+                (client_id,),
+            )
+        return {r["source_norm"]: r["target"] for r in rows}
+
+
+def upsert_corrections(
+    client_id: int | None,
+    pairs: list[tuple[str, str]],
+    origin: str = "operator",
+    learned_from: str = "",
+) -> dict[str, int]:
+    """Remember these cells, reporting what actually changed.
+
+    Unusable pairs are counted as `skipped` rather than raised: this is called
+    from the export path with thousands of rows at once, and failing a whole
+    export because one cell was blank would cost the operator the file they
+    asked for.
+    """
+    if client_id is not None:
+        get_client(client_id)
+
+    clean: dict[str, tuple[str, str]] = {}
+    skipped = 0
+    for source, target in pairs:
+        source = (source or "").strip()
+        target = (target or "").strip()
+        norm = textkey.normalise(source)
+        # `has_latin` because `excel.extract` only ever produces Latin-bearing
+        # sources: a Malayalam string in the English column can never match a
+        # cell, and refusing it here is what makes a swapped-column import
+        # visible instead of silently poisoning the memory.
+        if (
+            not source
+            or not target
+            or not norm
+            or len(source) > MAX_CORRECTION_CHARS
+            or len(target) > MAX_CORRECTION_CHARS
+            or not textkey.has_latin(source)
+        ):
+            skipped += 1
+            continue
+        # Last one wins within a single call, so a sheet containing the same
+        # cell twice does not depend on insertion order.
+        clean[norm] = (source, target)
+
+    if not clean:
+        return {"added": 0, "updated": 0, "skipped": skipped}
+
+    where, params = _scope_clause(client_id)
+    with cursor() as cur:
+        # Counted before writing: `rowcount` reports 1 for both halves of an
+        # upsert and cannot tell an insert from an update.
+        existing = {
+            r["source_norm"]
+            for r in cur.execute(
+                f"SELECT source_norm FROM corrections WHERE {where}", params
+            )
+            if r["source_norm"] in clean
+        }
+        now = _now()
+        rows = [
+            (client_id, source, norm, target, origin, learned_from, now)
+            for norm, (source, target) in clean.items()
+        ]
+        conflict = (
+            "ON CONFLICT(source_norm) WHERE client_id IS NULL"
+            if client_id is None
+            else "ON CONFLICT(client_id, source_norm) WHERE client_id IS NOT NULL"
+        )
+        cur.executemany(
+            "INSERT INTO corrections"
+            "(client_id, source, source_norm, target, origin, learned_from, updated_at) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?) "
+            f"{conflict} DO UPDATE SET "
+            "  source = excluded.source, target = excluded.target, "
+            "  origin = excluded.origin, learned_from = excluded.learned_from, "
+            "  updated_at = excluded.updated_at",
+            rows,
+        )
+    return {
+        "added": len(clean) - len(existing),
+        "updated": len(existing),
+        "skipped": skipped,
+    }
+
+
+def delete_correction(correction_id: int) -> None:
+    with cursor() as cur:
+        cur.execute("DELETE FROM corrections WHERE id = ?", (correction_id,))
+
+
+def forget_job(job_id: str) -> int:
+    """Undo everything one export taught, and say how much that was.
+
+    Learning happens automatically on export, so a single click on a 33,000-row
+    sheet can write tens of thousands of entries. That is the intended payoff,
+    and this is why it is not frightening: it is one operation to take back.
+    """
+    if not job_id:
+        return 0
+    with cursor() as cur:
+        cur.execute("DELETE FROM corrections WHERE learned_from = ?", (job_id,))
+        return cur.rowcount
+
 # --- API keys --------------------------------------------------------------
 
-KEY_NAMES = ("GEMINI_API_KEY", "FAL_API_KEY", "REPLICATE_API_TOKEN")
+KEY_NAMES = (
+    "GEMINI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "FAL_API_KEY",
+    "REPLICATE_API_TOKEN",
+)
 
 
 def _now() -> str:

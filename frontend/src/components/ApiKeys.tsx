@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
+import { useConfirm } from "@/lib/useConfirm"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -18,6 +19,7 @@ import {
 
 const LABELS: Record<string, string> = {
   GEMINI_API_KEY: "Google Gemini",
+  ANTHROPIC_API_KEY: "Anthropic Claude (Excel Malayalam check)",
   FAL_API_KEY: "fal.ai (optional fallback)",
   REPLICATE_API_TOKEN: "Replicate (optional fallback)",
 }
@@ -30,6 +32,7 @@ const LABELS: Record<string, string> = {
  * key; nothing reveals one.
  */
 export function ApiKeys() {
+  const { pending, confirm } = useConfirm()
   const [keys, setKeys] = useState<KeyRow[]>([])
   const [location, setLocation] = useState("")
   const [budget, setBudget] = useState<Budget | null>(null)
@@ -217,11 +220,14 @@ export function ApiKeys() {
               <Button
                 variant="ghost"
                 onClick={async () => {
+                  // Removing a key is not recoverable from inside this app —
+                  // the plaintext was never stored anywhere it can be read back.
+                  if (!confirm(row.name)) return
                   setKeys((await removeKey(row.name)).keys)
                   toast.success("Key removed")
                 }}
               >
-                Remove
+                {pending === row.name ? "Click again" : "Remove"}
               </Button>
             )}
           </div>

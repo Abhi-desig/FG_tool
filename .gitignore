@@ -33,6 +33,11 @@ venv/
 # node_modules never ships. dist/ is built output — see the note below.
 node_modules/
 frontend/dist/
+
+# The shop PC package, built by scripts/package_windows.py. A build artefact of
+# a build artefact — regenerate it, never commit it. Unignored, `git add -A`
+# would commit a second copy of the whole backend plus a zip of it.
+/dist/
 frontend/.vite/
 npm-debug.log*
 
@@ -52,6 +57,11 @@ Thumbs.db
 
 
 # NOTE on frontend/dist/
+
+# The shop PC package, built by scripts/package_windows.py. A build artefact of
+# a build artefact — regenerate it, never commit it. Unignored, `git add -A`
+# would commit a second copy of the whole backend plus a zip of it.
+/dist/
 # Ignored during development, and **force-added on every release commit**. That
 # is the settled policy, not one of two options: the shop PC has no Node, so a
 # plain clone has to be runnable.

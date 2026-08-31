@@ -556,6 +556,129 @@ will draw it wrong.
 
 ---
 
+## ADR-028 · A sheet of names is checked by Claude, and the check may replace a row
+
+**Date:** 2026-08-29
+**Context:** A co-operative bank's 33,000-cell member list came back unusable.
+`opus-mt-en-ml` is a *translation* model — it must find meaning — and a member
+list is almost entirely proper nouns. Measured on the operator's own file:
+`ELAVUNKAL VEEDU,VADASERIKARA` returned as "യൂക്കാലിപ് റ്റസ്" (Eucalyptus), and
+`THOPPIL VEEDU,UTHIMOODU P.O,` returned carrying a fabricated "retrieved on June
+2, 2019" citation. Only the simplest name in the sample survived. The failure is
+invention, not spelling: for those rows the output has no relationship to the
+input, so a spell-check over it has nothing to correct.
+**Decision:** An **optional, off-by-default, paid** second pass. Claude
+(`claude-sonnet-5`, the operator's choice on cost) is given each source and the
+offline model's Malayalam, and returns a verdict per row. It is allowed to
+*replace* the row, not merely respell it, and is told the rule the local model
+does not know: a person, house or place is written by **sound** in Malayalam
+script, never translated for meaning. The offline text is kept alongside the
+replacement, because on a sheet of names a correction is a whole new line and
+the operator is the one who decides which reading is right.
+**Reasoning:** The alternative — a rule-based transliterator kept offline — was
+weighed and is the better default long-term, but it will not read a header row
+or know when a cell is genuinely English. The operator asked for the check
+shape, was shown the fabrication evidence, and chose it.
+**Consequences:** The first dependency added since Phase 5 (`anthropic`, MIT),
+the first Anthropic key in the store, and **the first feature that sends client
+data off the machine** — a fact the panel states before the job starts, not
+after. `MONTHLY_BUDGET_PAISE` moved to `backend/budget.py`: the ceiling is the
+shop's, not one provider's, and a feature module may not import another.
+Spend is computed from the token counts the API reports rather than the quote,
+and is recorded even if the operator cancels halfway.
+
+**The failure this design is built against** is not a bad translation — it is a
+row silently filled in with *another member's* name, which on a 33,000-row sheet
+would never be found. Rows go out numbered and must come back numbered; a
+number that is missing, repeated, unrecognised, empty, or answered in the wrong
+script leaves the offline translation in place and flags the row. Every one of
+those cases is a test in `tests/test_verify.py`.
+
+---
+
+## ADR-029 · A correction the operator makes once is remembered for good
+
+**Date:** 2026-08-31
+**Context:** ADR-028 bought a second opinion on a sheet of names, but it bought it
+*again every time*. The operator fixes `ELAVUNKAL VEEDU,VADASERIKARA` in the review
+grid, exports, and next year's member list from the same co-operative makes the
+identical mistake — and either costs the shop another paid pass or gets shipped
+wrong. Nothing the operator approved was ever kept. The glossary does not solve
+this: it masks a *phrase* inside a sentence (`features/glossary.py`), and what is
+needed here is recall of an entire cell.
+**Decision:** A `corrections` table holding source cell → the operator's approved
+Malayalam, consulted **before** the model and before the paid check. Shop-wide by
+default, with an optional per-client row that overrides it. Filled automatically on
+export from the difference between the operator's final text and what the offline
+model produced, and loadable in bulk from a two-column .xlsx. A Claude correction
+becomes permanent only if the operator keeps it through to export.
+**Reasoning:** Shop-wide because a house name written by sound is right for every
+client, and the shop sees a given co-operative's sheet about once a year — a purely
+per-client memory would be empty at exactly the moment it mattered. Per-client trade
+terms are already the glossary's job (`translate._TRADE_TERMS`). Automatic on export
+because a memory that only fills when a second button is pressed stays empty, which
+is the same as not shipping it. The diff is computed on the **server**, because the
+grid seeds its edit map with every row and a client-side diff that went wrong would
+make thousands of unreviewed machine translations permanent in one click.
+**Evidence:** Measured on the operator's own file, and recorded in ADR-028. Lookup
+is whitespace-collapsed and casefolded because the same name arrives as
+`ELAVUNKAL  VEEDU` one year and `Elavunkal Veedu` the next; `backend/textkey.py`
+holds the one definition both `db.py` and `features/translate.py` use, so they
+cannot drift apart.
+**Consequences:** No new dependency and no migration — a new table costs nothing
+under `CREATE TABLE IF NOT EXISTS`, which is what `db.py` already does. Two partial
+unique indexes rather than one constraint, because SQLite treats NULLs as distinct
+and a plain `UNIQUE (client_id, source_norm)` would store the same shop-wide string
+endlessly. A wrong approval propagates shop-wide; bounded by a badge on every
+remembered row, a searchable list in Settings, and `forget-job`, which undoes
+everything one export taught. Three defects were fixed alongside it: glossary-only
+rows were being sent to the paid check and could be overwritten by it; cancelling a
+checked job threw away the whole offline translation while still recording the
+spend; and the cost quote counted rows that would never reach the model.
+
+## ADR-030 · The AI may write the poster's words, and may never write its digits
+
+**Date:** 2026-08-31
+**Context:** ROADMAP Phase 4 says posters start "with plain templates and no AI at
+all", and `backend/api/posters.py` says "No AI here". The operator's report is that
+step 1 does not do the job: `posters.split_copy` only *sorts* pasted lines, it
+cannot write one. `tests/test_posters.py` records the failure directly — the brief
+"Onam sale, 40% off gold, Thrissur showroom, call 9876543210" pasted as one line
+becomes a single block containing the whole brief. The screen is only useful to
+somebody who already has the finished words.
+**Decision:** A fourth role in `features/ai.py`'s existing `ROLES` machinery, with
+its own editable prompt scope, returning three complete alternatives in English and
+Malayalam for the operator to pick from, mix, and rewrite. The route lives in
+`backend/api/ai.py`, not `api/posters.py`, so that module's "No AI here" stays
+literally true and the offline path remains the default. **No figure the operator
+did not type may appear in the result**: an alternative containing an invented
+price, percentage or date is discarded and the reason is shown. The operator's phone
+number is never sent to Google at all and is substituted locally afterwards.
+**Reasoning:** The boundary moved less than it looks. `plan_layout` has sent the
+headline, offer, occasion and phone to Google since Phase 5 — what is new is
+authorship, not exposure. What must not change does not: PRD forbids AI writing
+Malayalam *into an image*, and that is untouched — `styles._NO_LETTERING` is still
+appended to all six seeded bodies, `styles.validate` still refuses a body that omits
+it, and the copy role is `needs_image=False` so it cannot return pixels. The digit
+rule exists because this repo has already measured the failure class: ADR-028
+records the offline translator inventing a "retrieved on June 2, 2019" citation into
+a member's address. A fabricated "60% OFF" on a printed poster is the same failure
+with a print bill attached. Discarding rather than repairing, because there is no
+safe way to guess which number was meant, and two good alternatives are a usable
+screen.
+**Evidence:** ~₹0.10 a call at the shipped rate; twenty briefs a day is ₹60 a month
+against the ₹2,000 ceiling (ADR-024), charged only when the button is pressed. The
+guard reuses `verify_text_unchanged`, which already existed for the layout path;
+the digit rule is opt-in via a keyword so that path's behaviour is byte-identical.
+**Consequences:** ROADMAP Phase 4's "no AI at all" is superseded for step 1 only;
+its exit gate — SVG text sharp and editable, safe margin correct on a real print —
+is unaffected. One new preference key (`ai_model_copy`, which `ai.resolve_models`
+would raise without), one new prompt scope, one new role. No new dependency. The
+strict digit rule costs the model the copywriter's "Buy 1 Get 1" unless the operator
+types it; that is deliberate, and reversible by editing the prompt in Settings. Like
+ADR-025, this is built but not proven against the live API — no test here makes a
+real call.
+
 ## ADR-010 · Docs before code
 
 **Date:** 2026-08-22

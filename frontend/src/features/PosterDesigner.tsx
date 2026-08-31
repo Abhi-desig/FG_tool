@@ -2,6 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { AiArtwork } from "@/components/AiArtwork"
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion"
 import { type Copy, EMPTY_COPY, PosterCopy } from "@/components/PosterCopy"
 import { StylePicker } from "@/components/StylePicker"
 import { Badge } from "@/components/ui/badge"
@@ -21,18 +27,30 @@ import {
   type BlockSize,
   type CanvasPreset,
   type CopyLine,
+  type CalmRegion,
   type DesignStyle,
+  type StyleTextDefault,
   type PosterBlock,
   type PosterCheck,
   type PosterLayout,
   autoLayout,
   checkPoster,
   listStyles,
+  analysePoster,
   posterPresets,
   posterSvg,
 } from "@/lib/api"
 import { rasterIsReduced, renderPosterPng } from "@/lib/posterPng"
-import { LINE_HEIGHT, SIZE_SCALE, fitBlocks, measureBlocks } from "@/lib/textFit"
+import {
+  LINE_HEIGHT,
+  SIZE_SCALE,
+  applyCase,
+  fitBlocks,
+  leadingOf,
+  measureBlocks,
+  sizeFraction,
+  trackingOf,
+} from "@/lib/textFit"
 
 const SIZES: BlockSize[] = ["small", "medium", "large", "huge"]
 
@@ -60,7 +78,7 @@ const STEPS = [
   { n: 1, title: "The words" },
   { n: 2, title: "The look" },
   { n: 3, title: "The picture" },
-  { n: 4, title: "Finish" },
+  { n: 4, title: "Size & finish" },
 ] as const
 
 let counter = 0
@@ -79,12 +97,40 @@ function newBlock(
     y,
     width: 0.8,
     size,
+    size_fraction: null,
     weight: size === "huge" || size === "large" ? "bold" : "regular",
+    tracking: 0,
+    leading: LINE_HEIGHT,
     colour: "#ffffff",
     align: "centre",
+    case: "as-typed",
     mode: "unicode",
     shadow: true,
     role,
+  }
+}
+
+/**
+ * The eight fields a saved style is allowed to set on a block.
+ *
+ * An explicit list, not a spread. `text_defaults` is an unvalidated JSON column
+ * end to end, so `{...b, ...spec}` let a hand-edited style carrying
+ * `"headline": {"id": "t1"}` overwrite a block's identity — after which two
+ * blocks collide on one id and the fit map loses one of them. The server drops
+ * unknown keys too (`styles.normalise_text_defaults`); this is the second half
+ * of the same guard, on the side that actually assigns them.
+ */
+function fromStyle(block: PosterBlock, spec: StyleTextDefault): PosterBlock {
+  return {
+    ...block,
+    colour: spec.colour ?? block.colour,
+    size: spec.size ?? block.size,
+    size_fraction: spec.size_fraction ?? null,
+    weight: spec.weight ?? block.weight,
+    tracking: spec.tracking ?? 0,
+    leading: spec.leading ?? LINE_HEIGHT,
+    align: spec.align ?? block.align,
+    case: spec.case ?? "as-typed",
   }
 }
 
@@ -107,6 +153,8 @@ export function PosterDesigner() {
   const [canvasKey, setCanvasKey] = useState("a4-portrait")
   const [styles, setStyles] = useState<DesignStyle[]>([])
   const [styleKey, setStyleKey] = useState<string | null>(null)
+  /** The quietest region of the background picture, if one has been analysed. */
+  const [calm, setCalm] = useState<CalmRegion | null>(null)
   const [copy, setCopy] = useState<Copy>(EMPTY_COPY)
   const [blocks, setBlocks] = useState<PosterBlock[]>([])
   const [selected, setSelected] = useState<string | null>(null)
@@ -131,6 +179,7 @@ export function PosterDesigner() {
     () => styles.find((s) => s.key === styleKey) ?? null,
     [styles, styleKey],
   )
+  const styleDefaults = style?.text_defaults ?? {}
 
   const layout: PosterLayout = useMemo(
     () => ({ canvas: canvasKey, blocks, background_colour: bgColour }),
@@ -243,7 +292,12 @@ export function PosterDesigner() {
         const text = copy[role as Exclude<BlockRole, "free">].trim()
         if (!text || next.some((b) => b.role === role)) continue
         changed = true
-        next.push(newBlock(text, spec.y, spec.size, role as BlockRole))
+        // Seeded from the chosen style, not from `newBlock`'s white default:
+        // typing the phone number *after* picking Festival used to produce a
+        // small white line that matched nothing else on the poster.
+        const born = newBlock(text, spec.y, spec.size, role as BlockRole)
+        const look = styleDefaults[role as Exclude<BlockRole, "free">]
+        next.push(look ? fromStyle(born, look) : born)
       }
 
       if (!changed) return prev
@@ -276,8 +330,46 @@ export function PosterDesigner() {
       ...prev.filter((b) => b.role !== "free"),
       ...spare.map((text, i) => newBlock(text, 0.62 + i * 0.06, "small")),
     ])
-    setStep(2)
   }, [])
+
+  /**
+   * Step every over-trim line down a size until it fits.
+   *
+   * The export is hard-blocked while any line runs past the trim, and until now
+   * the only advice was "shorten it, or use a wider canvas" with no control to
+   * do either. In practice a single notch is almost always enough — huge to
+   * large is a 37% cut before the fitter even starts — so the operator was
+   * being stopped by something one click could clear.
+   */
+  const makeItFit = useCallback(() => {
+    const order: BlockSize[] = ["huge", "large", "medium", "small"]
+    const before = blocks
+    let stubborn: string[] = []
+
+    setBlocks((prev) =>
+      prev.map((b) => {
+        if (!pastTrim.has(b.id)) return b
+        const at = order.indexOf(b.size)
+        if (at < 0 || at === order.length - 1) {
+          stubborn.push(b.text)
+          return b
+        }
+        // Any hand-set size is cleared too, or the preset change does nothing.
+        return { ...b, size: order[at + 1], size_fraction: null }
+      }),
+    )
+
+    if (stubborn.length) {
+      toast.warning("Still too long", {
+        description: `“${stubborn[0]}” does not fit this canvas even at the smallest size. Shorten it, or pick a wider size.`,
+      })
+      return
+    }
+    toast("Made it fit", {
+      description: "Lines past the trim were stepped down a size.",
+      action: { label: "Undo", onClick: () => setBlocks(before) },
+    })
+  }, [blocks, pastTrim])
 
   /** Picking a look repaints the words too — half a style is not a style. */
   const applyStyle = useCallback((picked: DesignStyle) => {
@@ -287,7 +379,7 @@ export function PosterDesigner() {
     setBlocks((prev) =>
       prev.map((b) => {
         const spec = defaults[b.role as Exclude<BlockRole, "free">]
-        return spec ? { ...b, ...spec } : b
+        return spec ? fromStyle(b, spec) : b
       }),
     )
   }, [])
@@ -355,6 +447,14 @@ export function PosterDesigner() {
       if (previous) URL.revokeObjectURL(previous)
       return url
     })
+    // Phase 4's empty-space finding, made visible. It was only ever reachable
+    // through `/posters/auto`, which needs a file *and* re-places every block —
+    // so the operator could never simply be shown where the quiet part is.
+    // Offline and free.
+    setCalm(null)
+    analysePoster(file)
+      .then((r) => setCalm(r.calm_regions[0] ?? null))
+      .catch(() => setCalm(null))
   }, [])
 
   const runAuto = async () => {
@@ -438,7 +538,7 @@ export function PosterDesigner() {
     1: copy.headline.trim().length > 0,
     2: style !== null,
     3: bgFile !== null,
-    4: false,
+    4: preset !== null,
   }
 
   return (
@@ -463,6 +563,8 @@ export function PosterDesigner() {
             ref={stageRef}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
+            role="group"
+            aria-label={`Poster preview — ${preset?.label ?? "no size chosen"}`}
             className="relative w-full overflow-hidden rounded-xl border bg-muted"
             style={{
               aspectRatio: String(ratio),
@@ -472,6 +574,19 @@ export function PosterDesigner() {
               containerType: "size",
             }}
           >
+            {calm && showSafe && (
+              <div
+                aria-hidden="true"
+                title="Quietest area — words stay readable here"
+                className="pointer-events-none absolute rounded border border-dashed border-[color:var(--ok)]/70"
+                style={{
+                  left: `${calm.x * 100}%`,
+                  top: `${calm.y * 100}%`,
+                  width: `${calm.width * 100}%`,
+                  height: `${calm.height * 100}%`,
+                }}
+              />
+            )}
             {bgUrl && (
               <img
                 src={bgUrl}
@@ -505,20 +620,39 @@ export function PosterDesigner() {
               // and the export scale identically. Falls back to the requested
               // size until the preset has loaded and a fit exists.
               const heightFraction =
-                fit && preset
-                  ? fit.fontPx / preset.height_px
-                  : (SIZE_SCALE[block.size] ?? 0.055)
-              const lines = fit?.lines ?? [block.text]
+                fit && preset ? fit.fontPx / preset.height_px : sizeFraction(block)
+              // Already cased by the fitter. The fallback cases it too, so the
+              // preview never briefly shows the un-shouted text.
+              const lines = fit?.lines ?? [applyCase(block.text, block.case)]
               return (
                 <div
                   key={block.id}
                   role="button"
                   tabIndex={0}
-                  aria-label={`${ROLE_LABEL[block.role]}: ${block.text}`}
+                  // The text as the operator typed it, not the shouted version:
+                  // a screen reader should read what they wrote. The warning
+                  // state is folded in, because a coloured ring is not a signal
+                  // to somebody who cannot see it (DESIGN.md).
+                  aria-label={`${ROLE_LABEL[block.role]}: ${block.text}${
+                    pastTrim.has(block.id)
+                      ? " — will be cut off when printed"
+                      : unsafe.has(block.id)
+                        ? " — too close to the edge"
+                        : overBox.has(block.id)
+                          ? " — wider than its box"
+                          : ""
+                  }`}
+                  // `role="button"` alone tells a screen reader this activates;
+                  // arrow keys actually *move* it, which is a different thing.
+                  aria-roledescription="draggable text line"
+                  aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight"
                   onPointerDown={(e) => onPointerDown(e, block)}
                   onKeyDown={(e) => onKeyDown(e, block)}
                   onFocus={() => setSelected(block.id)}
-                  className={`absolute cursor-move select-none rounded px-1 outline-offset-2 ${
+                  // Focus and selection were drawn identically, so a keyboard
+                  // user could not tell which block they had landed on from
+                  // which one they had chosen.
+                  className={`absolute cursor-move select-none rounded px-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
                     selected === block.id ? "ring-2 ring-primary" : ""
                   } ${
                     pastTrim.has(block.id) || unsafe.has(block.id)
@@ -536,7 +670,12 @@ export function PosterDesigner() {
                     fontWeight: block.weight === "bold" ? 700 : 400,
                     textAlign: block.align === "centre" ? "center" : block.align,
                     textShadow: block.shadow ? "0 0 0.18em rgba(0,0,0,0.55)" : undefined,
-                    lineHeight: LINE_HEIGHT,
+                    lineHeight: fit?.leading ?? leadingOf(block),
+                    // In ems, matching the measurement and the SVG. Not CSS
+                    // `text-transform` for case, though — that is applied to
+                    // the string itself so all four renderers draw the same
+                    // characters and the measurement measures what is drawn.
+                    letterSpacing: `${trackingOf(block)}em`,
                     // Each line is its own row, and the SVG emits one <tspan>
                     // per line at the same spacing — so the break the operator
                     // sees is the break that exports. `nowrap` keeps the browser
@@ -578,6 +717,14 @@ export function PosterDesigner() {
               <p className="mt-1 text-muted-foreground">
                 Export is off until this is fixed.
               </p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-2"
+                onClick={makeItFit}
+              >
+                Make it fit
+              </Button>
             </div>
           )}
 
@@ -624,8 +771,10 @@ export function PosterDesigner() {
               onClick={() => {
                 const added = newBlock("New line", 0.5, "medium")
                 setBlocks((prev) => [...prev, added])
+                // Selecting it is enough now that the inspector is always
+                // mounted — jumping the accordion collapsed whatever the
+                // operator was reading.
                 setSelected(added.id)
-                setStep(4)
               }}
             >
               Add a line
@@ -722,7 +871,7 @@ export function PosterDesigner() {
 
           <Step
             n={4}
-            title="Finish"
+            title="Size & finish"
             summary={preset?.label ?? "Choose a size"}
             open={step === 4}
             done={done[4]}
@@ -762,28 +911,59 @@ export function PosterDesigner() {
                 />
               </div>
 
-              <Separator />
-
-              {current ? (
-                <BlockInspector
-                  block={current}
-                  onChange={(patch) => update(current.id, patch)}
-                  onRemove={() => {
-                    if (current.role !== "free") {
-                      setCopy((prev) => ({ ...prev, [current.role]: "" }))
-                    }
-                    setBlocks((prev) => prev.filter((b) => b.id !== current.id))
-                    setSelected(null)
-                  }}
-                />
-              ) : (
-                <p className="text-xs text-muted-foreground">
-                  Click a line on the poster to change how it looks. Drag to move it,
-                  or use the arrow keys — hold Shift for bigger steps.
-                </p>
-              )}
             </div>
           </Step>
+
+          {/*
+            The inspector lives outside the steps, and is always mounted.
+
+            It used to render inside step 4, and `Step` renders its children
+            only while open — so on steps 1 to 3 the operator clicked a line on
+            the poster and nothing happened at all. Worse, the sentence
+            explaining that ("Click a line on the poster…") was itself inside
+            the panel it was explaining. Selecting a block is not part of any
+            one step; it is what the operator does throughout.
+          */}
+          <div className="space-y-3 rounded-xl border bg-card p-4">
+            <h3 className="text-sm font-semibold">
+              {current ? `Selected: ${ROLE_LABEL[current.role]}` : "Nothing selected"}
+            </h3>
+            {current ? (
+              <BlockInspector
+                block={current}
+                preset={preset}
+                onChange={(patch) => update(current.id, patch)}
+                onRemove={() => {
+                  const removed = current
+                  if (removed.role !== "free") {
+                    setCopy((prev) => ({ ...prev, [removed.role]: "" }))
+                  }
+                  setBlocks((prev) => prev.filter((b) => b.id !== removed.id))
+                  setSelected(null)
+                  // DESIGN.md principle 5: nothing is lost. A removed line is
+                  // the operator's own words, and retyping them is the slowest
+                  // part of the job.
+                  toast("Line removed", {
+                    action: {
+                      label: "Undo",
+                      onClick: () => {
+                        setBlocks((prev) => [...prev, removed])
+                        if (removed.role !== "free") {
+                          setCopy((prev) => ({ ...prev, [removed.role]: removed.text }))
+                        }
+                        setSelected(removed.id)
+                      },
+                    },
+                  })
+                }}
+              />
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Click a line on the poster to change how it looks. Drag to move it,
+                or use the arrow keys — hold Shift for bigger steps.
+              </p>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -813,48 +993,76 @@ function Step({
   onOpen: () => void
   children: React.ReactNode
 }) {
-  const label = STEPS[n - 1]?.title ?? title
+  // The prop wins. `STEPS` came first and silently shadowed it, so renaming a
+  // step at the call site changed nothing — two sources of truth for one
+  // string, with the invisible one in charge.
+  const label = title || (STEPS[n - 1]?.title ?? "")
+  const value = `step-${n}`
   return (
-    <section className={`rounded-xl border bg-card ${open ? "" : "bg-card/60"}`}>
-      <button
-        type="button"
-        onClick={onOpen}
-        aria-expanded={open}
-        className="flex w-full items-center gap-3 rounded-xl p-3 text-left outline-offset-2 hover:bg-accent/50"
-      >
-        <span
-          className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
-            done
-              ? "bg-primary text-primary-foreground"
-              : "border border-border text-muted-foreground"
-          }`}
-          aria-hidden="true"
-        >
-          {done ? "✓" : n}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block text-sm font-semibold">{label}</span>
-          {!open && (
-            <span className="malayalam block truncate text-xs text-muted-foreground">
-              {summary}
+    <Accordion
+      type="single"
+      collapsible
+      value={open ? value : ""}
+      onValueChange={(next) => {
+        // Radix reports "" when the open item is collapsed. Reopening the same
+        // step is what `onOpen` already meant, so closing is a no-op here
+        // rather than a fifth state the rest of the screen would have to know
+        // about.
+        if (next === value) onOpen()
+      }}
+      className={`rounded-xl border bg-card ${open ? "" : "bg-card/60"}`}
+    >
+      <AccordionItem value={value} className="border-b-0">
+        <AccordionTrigger className="items-center gap-3 p-3 hover:no-underline">
+          <span
+            className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
+              done
+                ? "bg-primary text-primary-foreground"
+                : "border border-border text-muted-foreground"
+            }`}
+            aria-hidden="true"
+          >
+            {done ? "✓" : n}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-semibold">
+              {label}
+              {/*
+                The tick was inside `aria-hidden`, so a screen-reader user got
+                no completion signal at all — DESIGN.md: colour, or a glyph, is
+                never the only signal.
+              */}
+              {done && <span className="sr-only"> — done</span>}
             </span>
-          )}
-        </span>
-      </button>
-      {open && <div className="border-t p-3">{children}</div>}
-    </section>
+            {!open && (
+              <span className="malayalam block truncate text-xs text-muted-foreground">
+                {summary}
+              </span>
+            )}
+          </span>
+        </AccordionTrigger>
+        <AccordionContent className="border-t p-3">{children}</AccordionContent>
+      </AccordionItem>
+    </Accordion>
   )
 }
 
 function BlockInspector({
   block,
+  preset,
   onChange,
   onRemove,
 }: {
   block: PosterBlock
+  preset: CanvasPreset | null
   onChange: (patch: Partial<PosterBlock>) => void
   onRemove: () => void
 }) {
+  // A print operator thinks in millimetres, not in fractions of a page.
+  const heightMm = preset
+    ? ((block.size_fraction ?? SIZE_SCALE[block.size] ?? 0.055) * preset.height_mm).toFixed(1)
+    : null
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -882,7 +1090,14 @@ function BlockInspector({
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
           <Label htmlFor="block-size">Size</Label>
-          <Select value={block.size} onValueChange={(v) => onChange({ size: v as BlockSize })}>
+          <Select
+            value={block.size}
+            onValueChange={(v) =>
+              // Picking a preset clears any hand-set size, so the two controls
+              // never disagree about which one is in force.
+              onChange({ size: v as BlockSize, size_fraction: null })
+            }
+          >
             <SelectTrigger id="block-size">
               <SelectValue />
             </SelectTrigger>
@@ -940,6 +1155,93 @@ function BlockInspector({
           </Select>
         </div>
       </div>
+
+      {/*
+        Secondary controls behind a disclosure, matching `AiArtwork`'s
+        "See exactly what will be sent". Eight controls flat would bury the
+        four the operator touches on every job.
+      */}
+      <details className="rounded-lg border">
+        <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
+          Fine typography
+        </summary>
+        <div className="space-y-3 border-t p-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="block-size-pct">Exact size (% of poster height)</Label>
+            <Input
+              id="block-size-pct"
+              type="number"
+              min={1}
+              max={40}
+              step={0.5}
+              value={
+                block.size_fraction != null
+                  ? Number((block.size_fraction * 100).toFixed(1))
+                  : ""
+              }
+              placeholder={`${((SIZE_SCALE[block.size] ?? 0.055) * 100).toFixed(1)} (from "${block.size}")`}
+              onChange={(e) => {
+                const value = e.target.value.trim()
+                onChange({
+                  size_fraction: value === "" ? null : Number(value) / 100,
+                })
+              }}
+            />
+            {heightMm && (
+              <p className="text-xs text-muted-foreground">
+                About {heightMm} mm tall on this canvas. Clear it to go back to
+                the preset.
+              </p>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="block-tracking">Letter spacing</Label>
+              <Input
+                id="block-tracking"
+                type="number"
+                min={-0.05}
+                max={0.5}
+                step={0.01}
+                value={block.tracking}
+                onChange={(e) => onChange({ tracking: Number(e.target.value) })}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="block-leading">Line spacing</Label>
+              <Input
+                id="block-leading"
+                type="number"
+                min={0.8}
+                max={3}
+                step={0.05}
+                value={block.leading}
+                onChange={(e) => onChange({ leading: Number(e.target.value) })}
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="block-case">Letter case</Label>
+            <Select
+              value={block.case}
+              onValueChange={(v) => onChange({ case: v as PosterBlock["case"] })}
+            >
+              <SelectTrigger id="block-case">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="as-typed">As typed</SelectItem>
+                <SelectItem value="upper">UPPERCASE</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Malayalam has no capitals, so this changes nothing there.
+            </p>
+          </div>
+        </div>
+      </details>
 
       <div className="space-y-1.5">
         <Label htmlFor="block-mode">Font for export</Label>

@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { toast } from "sonner"
 
+import { AiCopyWriter } from "@/components/AiCopyWriter"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -156,6 +157,14 @@ export function PosterCopy({
       <p className="text-xs text-muted-foreground">
         Every line stays real, editable text — the picture never contains words.
       </p>
+
+      <Separator />
+
+      {/*
+        Offline and free is above; paid is below. An install with no Gemini key
+        loses nothing by this being here.
+      */}
+      <AiCopyWriter copy={copy} onUse={(patch) => onChange({ ...copy, ...patch })} />
     </div>
   )
 }

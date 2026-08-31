@@ -8,15 +8,18 @@ characters, well-formed, with nothing converted to paths.
 from __future__ import annotations
 
 import io
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw
 
-from backend.features import posters
+from backend.features import fonts, posters
 
 SVG_NS = "{http://www.w3.org/2000/svg}"
+
+PYTHON_SOURCE = Path(posters.__file__).read_text(encoding="utf-8")
 
 
 def block(**kwargs) -> posters.TextBlock:
@@ -671,3 +674,203 @@ def test_safe_zone_and_overflow_agree() -> None:
     assert posters.outside_safe_zone(canvas, blk, fitted), (
         "text running past the trim was reported as inside the safe zone"
     )
+
+
+# --- the two copies of the fitter ------------------------------------------
+#
+# `frontend/src/lib/textFit.ts` measures in the browser and `posters.fit_block`
+# applies the same shrink-then-wrap rule to the measurement. The constants are
+# duplicated across the two, and textFit.ts's own docstring says they "must stay
+# in step — that pairing is what makes the preview, the PNG proof and the
+# exported SVG agree on where the text breaks". Until now nothing checked it, so
+# the promise was worth exactly as much as somebody remembering it. Drift here
+# does not raise: it makes the preview quietly lie about the printed output.
+
+TEXTFIT = Path(__file__).resolve().parent.parent / "frontend" / "src" / "lib" / "textFit.ts"
+
+
+def _ts_number(source: str, name: str) -> float:
+    """Read `const NAME = 1.25` out of the TypeScript."""
+    found = re.search(rf"\b{name}\s*=\s*([0-9.]+)", source)
+    assert found, f"textFit.ts no longer declares {name} — the mirror is broken"
+    return float(found.group(1))
+
+
+def _ts_size_scale(source: str) -> dict[str, float]:
+    body = re.search(r"SIZE_SCALE[^{]*\{(.*?)\}", source, re.DOTALL)
+    assert body, "textFit.ts no longer declares SIZE_SCALE"
+    return {k: float(v) for k, v in re.findall(r"(\w+)\s*:\s*([0-9.]+)", body.group(1))}
+
+
+def test_both_copies_of_the_fitter_use_the_same_constants() -> None:
+    source = TEXTFIT.read_text(encoding="utf-8")
+    assert _ts_size_scale(source) == posters.SIZE_SCALE
+    assert _ts_number(source, "MIN_FIT_SCALE") == posters.MIN_FIT_SCALE
+    assert _ts_number(source, "LINE_HEIGHT") == posters.LINE_HEIGHT
+
+
+def test_both_copies_of_the_fitter_take_the_same_number_of_wrap_steps() -> None:
+    """`for step in range(0, 41)` against `WRAP_STEPS = 40`.
+
+    Off by one here and the two pick different font sizes at the boundary, so a
+    block wraps in the preview and not in the SVG, or the reverse.
+    """
+    python_steps = re.search(r"for step in range\(0,\s*(\d+)\)", PYTHON_SOURCE)
+    assert python_steps, "fit_block no longer walks a fixed step range"
+    ts_steps = _ts_number(TEXTFIT.read_text(encoding="utf-8"), "WRAP_STEPS")
+    assert int(python_steps.group(1)) == int(ts_steps) + 1
+
+
+# --- typography -------------------------------------------------------------
+#
+# Five new per-block fields. Every one of them has to reach four renderers that
+# do not share code — the DOM preview, the SVG export, the PNG proof and the
+# duplicated fitter — so these test the rules that keep them agreeing.
+
+
+def test_a_block_with_no_typography_renders_exactly_as_before() -> None:
+    """The defaults are the contract. Every poster the shop has already made
+    predates these fields, and none of them may move by a pixel."""
+    canvas = posters.CANVASES["a4-portrait"]
+    plain = posters.TextBlock(id="h", text="GRAND SALE", size="large")
+    assert plain.tracking == 0.0
+    assert plain.leading == posters.LINE_HEIGHT
+    assert plain.case == "as-typed"
+    assert plain.size_fraction is None
+
+    # The requested size still comes from the bucket; whatever the fitter then
+    # does to it is the behaviour that already shipped.
+    assert posters.size_fraction(plain) == posters.SIZE_SCALE["large"]
+    fitted = posters.fit_block(plain, canvas)
+    assert fitted.height == pytest.approx(
+        fitted.font_px * posters.LINE_HEIGHT / canvas.height_px
+    )
+    assert fitted.lines == ["GRAND SALE"]
+    assert 'letter-spacing' not in posters.render_svg(posters.Layout(blocks=[plain]))
+
+
+def test_a_size_fraction_overrides_the_bucket() -> None:
+    canvas = posters.CANVASES["a4-portrait"]
+    blk = block(id="h", text="X", size="small", size_fraction=0.2)
+    assert posters.size_fraction(blk) == 0.2
+    assert posters.fit_block(blk, canvas).font_px == 0.2 * canvas.height_px
+
+
+def test_an_unprintable_size_fraction_falls_back_to_the_bucket() -> None:
+    """Clamping would silently pick a size the operator never chose."""
+    blk = block(id="h", size="large", size_fraction=9.0).clamp()
+    assert blk.size_fraction is None
+    assert posters.size_fraction(blk) == posters.SIZE_SCALE["large"]
+
+
+def test_tracking_widens_a_line_by_exactly_its_character_count() -> None:
+    """Arithmetic, never measured — that is the only way the browser's fitter
+    and this one can agree without a shaping engine.
+
+    The full count, not count − 1: CSS and SVG both add letter spacing after
+    every character, the last one included.
+    """
+    text = "SALE"
+    natural = posters._advance_em(text)
+    assert posters._advance_em(text, 0.1) == pytest.approx(natural + 0.1 * len(text))
+
+
+def test_tracking_reaches_the_exported_svg_only_when_it_is_set() -> None:
+    plain = posters.render_svg(posters.Layout(blocks=[block(id="h")]))
+    spaced = posters.render_svg(posters.Layout(blocks=[block(id="h", tracking=0.08)]))
+    assert "letter-spacing" not in plain
+    assert "letter-spacing" in spaced
+
+
+def test_uppercase_is_applied_before_the_ascii_conversion() -> None:
+    """The one ordering that puts silent garbage on a client's poster.
+
+    In `ascii` mode the string is ML-TTKarthika byte codes, where `.upper()`
+    selects entirely different glyphs. Malayalam is unicameral, so casing it is
+    a no-op — which is what makes doing it first safe.
+    """
+    malayalam = "കേരളം"
+    upper = posters.TextBlock(id="h", text=malayalam, mode="ascii", case="upper")
+    plain = posters.TextBlock(id="h", text=malayalam, mode="ascii", case="as-typed")
+    assert posters._text_for(upper) == posters._text_for(plain)
+    # And the ASCII is not itself upper-cased on the way out.
+    assert posters._text_for(upper) == fonts.unicode_to_ascii(malayalam)
+
+
+def test_uppercase_reaches_latin_text_in_the_svg() -> None:
+    svg = posters.render_svg(
+        posters.Layout(blocks=[block(id="h", text="grand sale", case="upper")])
+    )
+    assert "GRAND SALE" in svg
+    assert ">grand sale<" not in svg
+
+
+def test_a_wrapped_upper_case_block_is_not_cased_twice() -> None:
+    """`fit_block` cases before wrapping; `_line_text` must not case again."""
+    canvas = posters.CANVASES["a4-portrait"]
+    blk = block(id="h", text="grand opening sale today", size="huge", width=0.3,
+                case="upper")
+    fitted = posters.fit_block(blk, canvas)
+    assert fitted.lines, "fixture produced no lines"
+    for line in fitted.lines:
+        assert line == line.upper()
+
+
+def test_leading_changes_how_far_down_the_page_a_block_reaches() -> None:
+    """`Fitted.height` feeds `text_extent` and so the safe-zone check: raising
+    leading on a bottom-anchored line can newly push a poster past the trim.
+    That is correct behaviour — the text really does reach further — and it is
+    pinned here because it will read as a regression."""
+    canvas = posters.CANVASES["a4-portrait"]
+    tight = posters.fit_block(
+        block(id="h", text="one two three four five six", size="huge", width=0.3,
+              leading=1.0),
+        canvas,
+    )
+    loose = posters.fit_block(
+        block(id="h", text="one two three four five six", size="huge", width=0.3,
+              leading=2.0),
+        canvas,
+    )
+    assert len(tight.lines) == len(loose.lines), "fixture must wrap the same way"
+    assert loose.height > tight.height
+
+
+def test_leading_reaches_the_tspans_of_a_wrapped_block() -> None:
+    canvas = posters.CANVASES["a4-portrait"]
+    blk = block(id="h", text="one two three four five six", size="huge", width=0.3,
+                leading=2.0)
+    fitted = posters.fit_block(blk, canvas)
+    assert len(fitted.lines) > 1, "fixture must wrap"
+    svg = posters.render_svg(posters.Layout(blocks=[blk]))
+    assert f'dy="{fitted.font_px * 2.0:.1f}"' in svg
+
+
+def test_a_supplied_measurement_is_not_tracked_a_second_time() -> None:
+    """The wire contract: `measured` is the width that will be *drawn*, letter
+    spacing already included. Adding tracking to it again would double-count and
+    wrap text the browser had shown fitting."""
+    canvas = posters.CANVASES["a4-portrait"]
+    blk = block(id="h", text="SALE", size="small", tracking=0.3)
+    with_measure = posters.fit_block(blk, canvas, measured_em=2.0)
+    assert with_measure.width == pytest.approx(
+        2.0 * with_measure.font_px / canvas.width_px
+    )
+
+
+def test_the_embedded_font_is_found_where_a_packaged_install_puts_it() -> None:
+    """A packaged install ships only `frontend/dist` — there is no source tree
+    on the shop PC. Resolving the woff2 from `frontend/public` alone made
+    `_font_face` return "" and the exported SVG carry no embedded font, which is
+    invisible until somebody opens the file in CorelDRAW (NEXT.md 1.5).
+    """
+    assert posters.UNICODE_FONT_FILE.exists(), posters.UNICODE_FONT_FILE
+    assert posters.UNICODE_FONT_FILE.stat().st_size > 1000
+    # `dist` is the shipped one, so it must be preferred over `public`.
+    assert posters._FONT_CANDIDATES[0].parts[-3] == "dist"
+
+
+def test_a_unicode_poster_carries_its_font_inside_the_svg() -> None:
+    svg = posters.render_svg(posters.Layout(blocks=[block(id="h", text="കേരളം")]))
+    assert "@font-face" in svg
+    assert "base64" in svg, "the font was referenced but not embedded"

@@ -307,7 +307,10 @@ def test_synthid_watermark_is_disclosed(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_defaults_are_seeded_for_every_scope() -> None:
     scopes = {p["scope"] for p in prompts.list_prompts()}
-    assert scopes == {"poster-layout", "poster-artwork", "photo-edit"}
+    # Derived, not hardcoded: the point is that every declared scope has a
+    # shipped default to restore to, which stays true as scopes are added.
+    assert scopes == {s.key for s in prompts.SCOPES}
+    assert "poster-layout" in scopes
 
 
 def test_seeding_twice_does_not_duplicate() -> None:
@@ -676,3 +679,222 @@ def test_only_known_copy_roles_can_be_re_inserted() -> None:
         {"blocks": []}, {"headline": "SALE", "internal_note": "do not print"}
     )
     assert [b["id"] for b in fixed["blocks"]] == ["headline"]
+
+
+# --- writing the poster's words (ADR-030) ----------------------------------
+#
+# The first AI in this app that authors text a client will read off a printed
+# sheet. The tests that matter are the ones about digits: a fabricated
+# percentage or phone number is a reprint, and ADR-028 already measured this
+# failure class in translation.
+
+
+def _alt(
+    label: str,
+    headline: str,
+    offer: str,
+    malayalam: str = "ഓണം ഓഫർ",
+    malayalam_offer: str = "50% കിഴിവ്",
+) -> dict:
+    return {
+        "id": label.lower(),
+        "label": label,
+        "blocks": [
+            {"id": "headline", "text": headline},
+            {"id": "offer", "text": offer},
+        ],
+        "blocks_ml": [
+            {"id": "headline", "text": malayalam},
+            {"id": "offer", "text": malayalam_offer},
+        ],
+    }
+
+
+def _copy_reply(*alts: dict) -> FakeResponse:
+    return FakeResponse([FakePart(text=json.dumps({"alternatives": list(alts)}))])
+
+
+BRIEF = {"brief": "Onam sale, 50% off gold, Thrissur showroom"}
+
+
+def test_copy_comes_back_as_alternatives_in_both_languages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake(
+        monkeypatch,
+        response=_copy_reply(
+            _alt("Straight", "Onam Sale", "50% OFF"),
+            _alt("Warm", "Celebrate Onam", "50% OFF"),
+        ),
+    )
+    result = ai.write_copy(BRIEF)
+    assert result.ok, result.error
+    assert result.alternatives is not None
+    assert len(result.alternatives) == 2
+    for alt in result.alternatives:
+        assert alt["blocks"] and alt["blocks_ml"]
+
+
+def test_an_invented_percentage_voids_the_alternative_it_is_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure this guard exists for. 50% was typed; 80% was not."""
+    fake(
+        monkeypatch,
+        response=_copy_reply(
+            _alt("Honest", "Onam Sale", "50% OFF"),
+            _alt("Invented", "Onam Sale", "80% OFF"),
+        ),
+    )
+    result = ai.write_copy(BRIEF)
+    assert result.ok
+    assert [a["label"] for a in result.alternatives or []] == ["Honest"]
+    assert any("80" in w for w in result.warnings)
+
+
+def test_the_surviving_alternatives_are_still_offered_when_one_is_voided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two good options is a usable screen; refusing everything is not."""
+    fake(
+        monkeypatch,
+        response=_copy_reply(
+            _alt("A", "Onam Sale", "50% OFF"),
+            _alt("B", "Big Onam Sale", "50% OFF"),
+            _alt("C", "Onam Sale", "₹999 only"),
+        ),
+    )
+    result = ai.write_copy(BRIEF)
+    assert result.ok
+    assert len(result.alternatives or []) == 2
+
+
+def test_every_alternative_being_voided_is_a_refusal_not_a_silent_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake(monkeypatch, response=_copy_reply(_alt("Bad", "Sale", "80% OFF")))
+    result = ai.write_copy(BRIEF)
+    assert not result.ok
+    assert result.error and "untouched" in result.error
+    assert result.alternatives is None
+
+
+def test_a_figure_the_operator_typed_survives_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake(monkeypatch, response=_copy_reply(_alt("A", "Onam Sale", "50% OFF")))
+    result = ai.write_copy(BRIEF)
+    offer = next(b for b in result.alternatives[0]["blocks"] if b["id"] == "offer")
+    assert offer["text"] == "50% OFF"
+
+
+def test_a_reformatted_number_is_not_treated_as_invented(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """"9847 000 000" and "9847000000" are the same number."""
+    fake(monkeypatch, response=_copy_reply(_alt("A", "Call 9847000000", "50% OFF")))
+    result = ai.write_copy({"brief": "Onam sale, 50% off, call 9847 000 000"})
+    assert result.ok, result.warnings
+
+
+def test_a_phone_number_is_never_sent_to_google(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It is the highest-consequence field on the poster and the model has no
+    business writing it, so it never goes into the request at all."""
+    client = fake(monkeypatch, response=_copy_reply(_alt("A", "Onam Sale", "50% OFF")))
+    values = {"brief": "Onam sale, 50% off gold"}
+    result = ai.write_copy(values)
+    sent = json.dumps(client.models.calls[0])
+    assert "9876543210" not in sent
+    assert "9876543210" not in result.prompt_used
+
+
+def test_a_locked_headline_the_ai_rewrote_is_put_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reuses the layout path's guard rather than a second copy of it."""
+    fake(monkeypatch, response=_copy_reply(_alt("A", "Something Else", "50% OFF")))
+    result = ai.write_copy(BRIEF, {"headline": "ONAM MELA"})
+    headline = next(b for b in result.alternatives[0]["blocks"] if b["id"] == "headline")
+    assert headline["text"] == "ONAM MELA"
+    assert any("headline" in w for w in result.warnings)
+
+
+def test_an_alternative_with_no_malayalam_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malayalam spelled in English letters on a printed poster reads as a mistake."""
+    fake(
+        monkeypatch,
+        response=_copy_reply(
+            _alt(
+                "A",
+                "Onam Sale",
+                "50% OFF",
+                malayalam="Onam Ofar",
+                malayalam_offer="50% Kizhivu",
+            )
+        ),
+    )
+    result = ai.write_copy(BRIEF)
+    assert not result.ok
+    assert any("wrong script" in w for w in result.warnings)
+
+
+def test_an_empty_brief_is_refused_before_any_spend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = fake(monkeypatch, response=_copy_reply(_alt("A", "x", "y")))
+    result = ai.write_copy({"brief": "   "})
+    assert not result.ok
+    assert client.models.calls == []
+    assert result.cost_paise == 0
+
+
+def test_the_copy_prompt_can_be_read_without_spending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = fake(monkeypatch, response=_copy_reply(_alt("A", "x", "y")))
+    text = ai.copy_prompt(BRIEF)
+    assert "Onam sale" in text
+    assert client.models.calls == []
+
+
+def test_the_copy_default_forbids_inventing_a_figure_and_asks_for_no_picture() -> None:
+    body = prompts.active_prompt("poster-copy")["body"].lower()
+    assert "never write a number" in body
+    assert "never describe or draw a picture" in body
+
+
+def test_copy_has_no_batch_discount() -> None:
+    """Text-only work has no batch tier, so the toggle stays hidden."""
+    assert not ai.has_batch_discount("poster-copy")
+
+
+def test_copy_costs_more_than_a_layout_plan_and_far_less_than_a_picture() -> None:
+    assert ai.RATES_PAISE["layout"] < ai.RATES_PAISE["copy"] < ai.RATES_PAISE["artwork"]
+
+
+def test_the_copy_model_name_is_a_settable_preference() -> None:
+    """`ai.resolve_models` writes every role's preference back after repairing a
+    stale name, so a role missing from `db.DEFAULTS` turns "Test key" into a
+    500 the first time Google retires a model."""
+    assert ai.PREFERENCE_KEY["copy"] in db.DEFAULTS
+    db.set_preferences({ai.PREFERENCE_KEY["copy"]: "gemini-2.5-pro"})
+    assert ai.model_for("copy") == "gemini-2.5-pro"
+    db.set_preferences({ai.PREFERENCE_KEY["copy"]: ""})
+    assert ai.model_for("copy") == ai.COPY_MODEL
+
+
+def test_every_role_has_a_preference_key_the_database_accepts() -> None:
+    """The general form of the trap above, for whatever role is added next."""
+    for role in ai.ROLES:
+        assert ai.PREFERENCE_KEY[role.key] in db.DEFAULTS, role.key
+
+
+def test_the_layout_path_is_unchanged_when_no_digits_are_allow_listed() -> None:
+    """The digit rule is opt-in, so the eight existing layout tests still describe
+    the behaviour exactly."""
+    layout = {"blocks": [{"id": "headline", "text": "Sale 80% off"}]}
+    verified, notes = ai.verify_text_unchanged(layout, {})
+    assert notes == []
+    assert "fabricated" not in verified["blocks"][0]

@@ -12,7 +12,7 @@
  */
 
 import type { CanvasPreset, PosterBlock } from "@/lib/api"
-import { LINE_HEIGHT, fitBlock } from "@/lib/textFit"
+import { fitBlock, trackingOf } from "@/lib/textFit"
 
 /** Cap the raster so a 6 ft banner does not try to allocate 5184×3456×4 bytes. */
 const MAX_PIXELS = 40_000_000
@@ -72,6 +72,11 @@ export async function renderPosterPng(opts: RenderOptions): Promise<Blob> {
     // ML-TTKarthika, which has no Unicode Malayalam glyphs, would render tofu.
     // The ASCII conversion belongs in the SVG, where CorelDRAW consumes it.
     ctx.font = `${block.weight === "bold" ? 700 : 400} ${fontPx}px "Noto Sans Malayalam", sans-serif`
+    // Not universally supported. Where it is missing the glyphs are still
+    // correct but the spacing is not, and `rasterHonoursTracking` says so
+    // rather than letting the proof quietly disagree with the SVG.
+    const tracking = trackingOf(block)
+    ctx.letterSpacing = tracking ? `${tracking * fontPx}px` : "0px"
     ctx.textAlign =
       block.align === "left" ? "left" : block.align === "right" ? "right" : "center"
     ctx.textBaseline = "alphabetic"
@@ -81,7 +86,7 @@ export async function renderPosterPng(opts: RenderOptions): Promise<Blob> {
     const top = block.y * height + fontPx * 0.8
 
     fit.lines.forEach((line, i) => {
-      const y = top + i * fontPx * LINE_HEIGHT
+      const y = top + i * fontPx * fit.leading
       if (block.shadow) {
         ctx.lineJoin = "round"
         ctx.strokeStyle = "rgba(0,0,0,0.45)"
@@ -113,4 +118,16 @@ export async function renderPosterPng(opts: RenderOptions): Promise<Blob> {
 /** True when the raster had to be shrunk below the print size. */
 export function rasterIsReduced(preset: CanvasPreset): boolean {
   return scaleFor(preset) < 1
+}
+
+/**
+ * Whether this browser can draw letter spacing on a canvas.
+ *
+ * Canvas2D `letterSpacing` is not universal. Where it is missing, a block with
+ * tracking still rasterises with the right glyphs at the wrong spacing — so the
+ * PNG is no longer a proof of the SVG, and DESIGN.md says never to imply it is.
+ */
+export function rasterHonoursTracking(): boolean {
+  const ctx = document.createElement("canvas").getContext("2d")
+  return ctx !== null && "letterSpacing" in ctx
 }

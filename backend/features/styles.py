@@ -236,7 +236,7 @@ def _row(row: Any) -> dict[str, Any]:
         "body": row["body"],
         "palette": row["palette"],
         "swatches": _loads(row["swatches"], []),
-        "text_defaults": _loads(row["text_defaults"], {}),
+        "text_defaults": normalise_text_defaults(_loads(row["text_defaults"], {})),
         "is_default": bool(row["is_default"]),
         "sort_order": row["sort_order"],
         "updated_at": row["updated_at"],
@@ -249,6 +249,119 @@ def _loads(raw: str, fallback: Any) -> Any:
         return json.loads(raw)
     except (TypeError, ValueError):
         return fallback
+
+
+# --- the text defaults shape ------------------------------------------------
+#
+# A style has always carried `{colour, size, weight}` per role. Typography adds
+# five more fields, and they go into the same JSON column rather than new
+# columns: `db.py` creates its whole schema with `CREATE TABLE IF NOT EXISTS`
+# and has no migration mechanism at all, so a new column would need a
+# hand-written ALTER on a machine with nobody to run it. A JSON key costs
+# nothing and an old row simply lacks it.
+#
+# `normalise_text_defaults` is applied on *read* as well as on write, which is
+# what makes that safe: every row already in the operator's database is
+# repaired in memory on the way out, so nothing has to be migrated and an old
+# style renders exactly as it did before.
+
+ROLES: tuple[str, ...] = ("headline", "offer", "occasion", "phone")
+
+# Bounds, mirrored in `features/posters.py`. A style is a set of defaults, not a
+# licence to produce an unprintable poster.
+MIN_SIZE_FRACTION = 0.01
+MAX_SIZE_FRACTION = 0.40
+MIN_LEADING = 0.8
+MAX_LEADING = 3.0
+MIN_TRACKING = -0.05
+MAX_TRACKING = 0.5
+
+SIZES = ("small", "medium", "large", "huge")
+WEIGHTS = ("regular", "bold")
+ALIGNS = ("left", "centre", "right")
+# Only two. Malayalam is unicameral so title case is meaningless there, and for
+# Latin it is locale-dependent — neither belongs on a poster the shop prints.
+CASES = ("as-typed", "upper")
+
+DEFAULT_BACKGROUND = "#111111"
+
+ROLE_DEFAULT: dict[str, Any] = {
+    "colour": "#ffffff",
+    # Kept as the preset. Replacing the buckets outright would touch
+    # `TextBlockIn.size`'s Literal, `ai._FALLBACK_PLACEMENT`, the published
+    # `/posters/presets` sizes and a golden fixture — four blast radii for a
+    # cosmetic win. `size_fraction` overrides it when the operator sets one.
+    "size": "medium",
+    "size_fraction": None,
+    "weight": "regular",
+    "tracking": 0.0,
+    "leading": 1.25,
+    "align": "centre",
+    "case": "as-typed",
+}
+
+_HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _colour(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    return text if _HEX.match(text) else fallback
+
+
+def _one_of(value: Any, allowed: tuple[str, ...], fallback: str) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in allowed else fallback
+
+
+def _number(value: Any, low: float, high: float, fallback: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return min(max(number, low), high)
+
+
+def normalise_text_defaults(raw: Any) -> dict[str, Any]:
+    """Every role, every field, clamped — and nothing else.
+
+    Unknown keys inside a role are **dropped**, which is a fix as well as a
+    tidy-up: `PosterDesigner` spread this straight onto a block, so a
+    hand-edited style containing `"headline": {"id": "t1"}` could overwrite a
+    block's identity and collide two blocks onto one id.
+
+    Returned rather than raised, in the spirit of `_loads` above: a style that
+    has been edited by hand into something odd should render with sensible
+    defaults, not fail the whole Settings page.
+    """
+    source = raw if isinstance(raw, dict) else {}
+    out: dict[str, Any] = {
+        "background_colour": _colour(source.get("background_colour"), DEFAULT_BACKGROUND)
+    }
+    for role in ROLES:
+        spec = source.get(role)
+        spec = spec if isinstance(spec, dict) else {}
+        fraction = spec.get("size_fraction")
+        out[role] = {
+            "colour": _colour(spec.get("colour"), ROLE_DEFAULT["colour"]),
+            "size": _one_of(spec.get("size"), SIZES, ROLE_DEFAULT["size"]),
+            # None means "use the bucket". A number outside the printable range
+            # is treated the same way rather than clamped to a size nobody chose.
+            "size_fraction": (
+                None
+                if fraction is None
+                else _number(fraction, MIN_SIZE_FRACTION, MAX_SIZE_FRACTION, None)  # type: ignore[arg-type]
+            ),
+            "weight": _one_of(spec.get("weight"), WEIGHTS, ROLE_DEFAULT["weight"]),
+            "tracking": _number(
+                spec.get("tracking"), MIN_TRACKING, MAX_TRACKING, ROLE_DEFAULT["tracking"]
+            ),
+            "leading": _number(
+                spec.get("leading"), MIN_LEADING, MAX_LEADING, ROLE_DEFAULT["leading"]
+            ),
+            "align": _one_of(spec.get("align"), ALIGNS, ROLE_DEFAULT["align"]),
+            "case": _one_of(spec.get("case"), CASES, ROLE_DEFAULT["case"]),
+        }
+    return out
 
 
 def validate(body: str) -> list[str]:
@@ -349,6 +462,7 @@ def save_style(
     style_id: int | None = None,
 ) -> dict[str, Any]:
     """Create or update a style. The key is the stable handle a poster stores."""
+    text_defaults = normalise_text_defaults(text_defaults)
     key = key.strip().lower()
     if not KEY_PATTERN.fullmatch(key):
         raise StyleError(

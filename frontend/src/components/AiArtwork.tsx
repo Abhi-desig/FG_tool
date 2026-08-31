@@ -4,6 +4,7 @@ import { toast } from "sonner"
 import type { Copy } from "@/components/PosterCopy"
 import { OffMachineNotice } from "@/components/OffMachineNotice"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import {
@@ -183,15 +184,16 @@ export function AiArtwork({
         than not offering it.
       */}
       {batchDiscount && (
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
+        <div className="flex items-center gap-2 text-sm">
+          <Checkbox
+            id="artwork-batch"
             checked={batch}
-            onChange={(e) => setBatch(e.target.checked)}
-            className="size-4 accent-[color:var(--primary)]"
+            onCheckedChange={(v) => setBatch(v === true)}
           />
-          <span>Batch mode — half price, takes a few minutes</span>
-        </label>
+          <Label htmlFor="artwork-batch" className="font-normal">
+            Batch mode — half price, takes a few minutes
+          </Label>
+        </div>
       )}
 
       {/*
@@ -209,15 +211,16 @@ export function AiArtwork({
             The figure here is an estimate — check Google&rsquo;s console for the
             real one before deciding.
           </p>
-          <label className="mt-2 flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
+          <div className="mt-2 flex items-center gap-2 text-sm">
+            <Checkbox
+              id="artwork-over-budget"
               checked={overBudgetOk}
-              onChange={(e) => setOverBudgetOk(e.target.checked)}
-              className="size-4 accent-[color:var(--primary)]"
+              onCheckedChange={(v) => setOverBudgetOk(v === true)}
             />
-            <span>Spend past the budget anyway</span>
-          </label>
+            <Label htmlFor="artwork-over-budget" className="font-normal">
+              Spend past the budget anyway
+            </Label>
+          </div>
         </div>
       )}
 

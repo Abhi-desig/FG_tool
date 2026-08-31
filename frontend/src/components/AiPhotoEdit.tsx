@@ -3,6 +3,7 @@ import { toast } from "sonner"
 
 import { OffMachineNotice } from "@/components/OffMachineNotice"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { type AiResult, aiEstimate, aiStatus, editPhoto } from "@/lib/api"
@@ -108,15 +109,16 @@ export function AiPhotoEdit({ file }: { file: File }) {
             That total is an estimate — check Google&rsquo;s console for the real
             figure before deciding.
           </p>
-          <label className="mt-2 flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
+          <div className="mt-2 flex items-center gap-2 text-sm">
+            <Checkbox
+              id="photo-over-budget"
               checked={overBudgetOk}
-              onChange={(e) => setOverBudgetOk(e.target.checked)}
-              className="size-4 accent-[color:var(--primary)]"
+              onCheckedChange={(v) => setOverBudgetOk(v === true)}
             />
-            <span>Spend past the budget anyway</span>
-          </label>
+            <Label htmlFor="photo-over-budget" className="font-normal">
+              Spend past the budget anyway
+            </Label>
+          </div>
         </div>
       )}
 

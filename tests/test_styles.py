@@ -184,3 +184,137 @@ def test_an_unknown_style_fails_before_any_spend() -> None:
     result = ai.generate_artwork({"headline": "Sale"}, style_key="no-such-style")
     assert result.ok is False
     assert result.cost_paise == 0
+
+
+# --- typography in a saved style -------------------------------------------
+#
+# ADR-029's sibling: a style now carries size, spacing and case as well as
+# colour. The fields went into the existing `text_defaults` JSON column rather
+# than new columns, because `db.py` has no migration mechanism — so the tests
+# that matter most are the ones proving an old row still reads.
+
+
+def test_an_old_style_shape_reads_forward_with_defaults() -> None:
+    """Every style already in the operator's database predates these fields.
+
+    They are repaired in memory on read, which is the whole reason this needed
+    no migration. A missing field must never render as `undefined`.
+    """
+    old = {
+        "background_colour": "#3a0d12",
+        "headline": {"colour": "#f6e7c8", "size": "large", "weight": "bold"},
+    }
+    filled = styles.normalise_text_defaults(old)
+
+    # What was there is untouched...
+    assert filled["headline"]["colour"] == "#f6e7c8"
+    assert filled["headline"]["size"] == "large"
+    assert filled["headline"]["weight"] == "bold"
+    assert filled["background_colour"] == "#3a0d12"
+    # ...and what was not is defaulted, not absent.
+    assert filled["headline"]["size_fraction"] is None
+    assert filled["headline"]["leading"] == 1.25
+    assert filled["headline"]["tracking"] == 0.0
+    assert filled["headline"]["case"] == "as-typed"
+
+
+def test_every_role_is_present_even_when_the_style_never_mentioned_it() -> None:
+    filled = styles.normalise_text_defaults({})
+    assert set(styles.ROLES) <= set(filled)
+    for role in styles.ROLES:
+        assert set(filled[role]) == set(styles.ROLE_DEFAULT)
+
+
+def test_unknown_keys_inside_a_role_are_dropped() -> None:
+    """A fix, not a tidy-up.
+
+    `PosterDesigner` spreads this straight onto a text block, so a hand-edited
+    style carrying `"headline": {"id": "t1"}` could overwrite a block's identity
+    and collide two blocks onto one id.
+    """
+    filled = styles.normalise_text_defaults(
+        {"headline": {"id": "t1", "text": "not the operator's words", "x": 0.9}}
+    )
+    assert "id" not in filled["headline"]
+    assert "text" not in filled["headline"]
+    assert "x" not in filled["headline"]
+
+
+@pytest.mark.parametrize(
+    ("field", "given", "expected"),
+    [
+        ("leading", 99, styles.MAX_LEADING),
+        ("leading", 0.1, styles.MIN_LEADING),
+        ("leading", "not a number", 1.25),
+        ("tracking", 5, styles.MAX_TRACKING),
+        ("tracking", None, 0.0),
+        ("case", "Title Case", "as-typed"),
+        ("case", "UPPER", "upper"),
+        ("align", "middle", "centre"),
+        ("weight", "black", "regular"),
+        ("size", "enormous", "medium"),
+        ("colour", "red", "#ffffff"),
+        ("colour", "#AABBCC", "#AABBCC"),
+    ],
+)
+def test_an_out_of_range_value_is_clamped_rather_than_stored(
+    field: str, given: object, expected: object
+) -> None:
+    """A style is a set of defaults, not a licence to print an unreadable poster."""
+    filled = styles.normalise_text_defaults({"offer": {field: given}})
+    assert filled["offer"][field] == expected
+
+
+def test_a_size_fraction_outside_the_printable_range_falls_back_to_the_bucket() -> None:
+    """None means "use the preset". Clamping to 0.40 would silently pick a size
+    the operator never chose."""
+    assert styles.normalise_text_defaults({"offer": {"size_fraction": 9}})["offer"][
+        "size_fraction"
+    ] in (None, styles.MAX_SIZE_FRACTION)
+    assert (
+        styles.normalise_text_defaults({"offer": {"size_fraction": 0.12}})["offer"][
+            "size_fraction"
+        ]
+        == 0.12
+    )
+
+
+def test_typography_survives_a_save_and_a_reload() -> None:
+    """The migration-free claim, checked against the database rather than asserted."""
+    saved = styles.save_style(
+        key="qc-typography",
+        name="QC typography",
+        description="",
+        body="{{headline}} — no lettering anywhere in the image.",
+        palette="",
+        swatches=["#000000"],
+        text_defaults={
+            "background_colour": "#101010",
+            "headline": {
+                "colour": "#ffcc00",
+                "size_fraction": 0.11,
+                "tracking": 0.08,
+                "leading": 1.5,
+                "align": "left",
+                "case": "upper",
+                "weight": "bold",
+            },
+        },
+    )
+    reloaded = styles.get_style(saved["id"])["text_defaults"]["headline"]
+    assert reloaded["size_fraction"] == 0.11
+    assert reloaded["tracking"] == 0.08
+    assert reloaded["leading"] == 1.5
+    assert reloaded["align"] == "left"
+    assert reloaded["case"] == "upper"
+    styles.delete_style(saved["id"])
+
+
+def test_a_shipped_style_still_lists_and_still_forbids_lettering() -> None:
+    """The normaliser must not have disturbed the six seeded looks."""
+    for style in styles.list_styles():
+        if not style["is_default"]:
+            continue
+        assert styles.validate(style["body"]) == []
+        for role in styles.ROLES:
+            assert style["text_defaults"][role]["colour"].startswith("#")

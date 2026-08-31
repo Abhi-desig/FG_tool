@@ -31,9 +31,21 @@ class TextBlockIn(BaseModel):
     y: float = Field(default=0.1, ge=0, le=1)
     width: float = Field(default=0.8, gt=0, le=1)
     size: Literal["small", "medium", "large", "huge"] = "medium"
+    # Overrides `size` when set. Every field below is defaulted, so a poster
+    # laid out by an older `frontend/dist` still validates unchanged.
+    size_fraction: float | None = Field(
+        default=None, ge=posters.MIN_SIZE_FRACTION, le=posters.MAX_SIZE_FRACTION
+    )
     weight: Literal["regular", "bold"] = "regular"
+    tracking: float = Field(
+        default=0.0, ge=posters.MIN_TRACKING, le=posters.MAX_TRACKING
+    )
+    leading: float = Field(
+        default=posters.LINE_HEIGHT, ge=posters.MIN_LEADING, le=posters.MAX_LEADING
+    )
     colour: str = Field(default="#ffffff", pattern=r"^#[0-9a-fA-F]{6}$")
     align: Literal["left", "centre", "right"] = "centre"
+    case: Literal["as-typed", "upper"] = "as-typed"
     mode: Literal["unicode", "ascii"] = "unicode"
     shadow: bool = True
     role: Literal["headline", "offer", "occasion", "phone", "free"] = "free"
@@ -69,6 +81,12 @@ def presets() -> dict[str, object]:
     return {
         "canvases": posters.describe_presets(),
         "sizes": posters.SIZE_SCALE,
+        # Published so the style editor and the block inspector bound their
+        # inputs from one source rather than each hardcoding its own numbers.
+        "size_bounds": [posters.MIN_SIZE_FRACTION, posters.MAX_SIZE_FRACTION],
+        "tracking_bounds": [posters.MIN_TRACKING, posters.MAX_TRACKING],
+        "leading_bounds": [posters.MIN_LEADING, posters.MAX_LEADING],
+        "default_leading": posters.LINE_HEIGHT,
         "fonts": {
             "unicode": posters.DEFAULT_FONT_UNICODE,
             "ascii": posters.DEFAULT_FONT_ASCII,
@@ -117,9 +135,16 @@ def split_copy(body: CopyIn) -> dict[str, object]:
 
 class CheckRequest(BaseModel):
     layout: LayoutIn
-    # Real text widths at 1 em, measured by the browser with the font loaded and
-    # keyed by block id. The backend has no shaping engine, so when these are
-    # supplied they replace its estimate entirely.
+    # The width each block will actually be **drawn** at, in ems, measured by
+    # the browser with the font loaded and keyed by block id. The backend has no
+    # shaping engine, so when these are supplied they replace its estimate
+    # entirely.
+    #
+    # "Drawn", not "natural": the measurement includes the block's letter
+    # spacing and text case, because the browser measures the exact string it
+    # will render. Numerically identical for any poster made before those
+    # existed (tracking 0, case as-typed), but `fit_block` must not add tracking
+    # a second time — see the matching note in `frontend/src/lib/textFit.ts`.
     measured: dict[str, float] = Field(default_factory=dict, max_length=MAX_BLOCKS)
 
 

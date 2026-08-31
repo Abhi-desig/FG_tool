@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from backend import models
+from backend import models, textkey
 from backend.features import glossary, translate
 
 HAS_ENGINE = translate.available_engine() is not None
@@ -362,3 +362,99 @@ def test_restore_without_a_source_leaves_everything_alone() -> None:
     masked = glossary.Masked(text="X0X", terms={0: "സ്റ്റാൻഡി"}, source="")
     restored = glossary.restore("X X X", masked, source="")
     assert restored.debris == []
+
+
+# --- the corrections memory ------------------------------------------------
+#
+# ADR-029. These need neither a database nor a model: `translate_rows` is handed
+# the memory as plain data, which is the whole reason the lookup lives there
+# rather than in the router.
+
+
+def _memory(*pairs: tuple[str, str]) -> dict[str, str]:
+    return {textkey.normalise(source): target for source, target in pairs}
+
+
+def test_a_remembered_cell_never_reaches_the_model(monkeypatch) -> None:
+    """The point of the feature. If the model runs, the operator is paying
+    again — in time, and in the paid check — for an answer they already gave."""
+    monkeypatch.setattr(
+        translate, "_run_engine", lambda *a, **k: pytest.fail("the model was called")
+    )
+    rows = translate.translate_rows(
+        ["ELAVUNKAL VEEDU"], [], memory=_memory(("ELAVUNKAL VEEDU", "എളവുങ്കൽ വീട്"))
+    )
+    assert rows[0].translation == "എളവുങ്കൽ വീട്"
+    assert rows[0].from_memory
+
+
+def test_a_remembered_cell_is_matched_despite_case_and_spacing() -> None:
+    """The same name arrives shouted one year and title-cased the next."""
+    memory = _memory(("ELAVUNKAL  VEEDU,VADASERIKARA", "എളവുങ്കൽ"))
+    rows = translate.translate_rows(["Elavunkal Veedu,Vadaserikara"], [], memory=memory)
+    assert rows[0].from_memory
+    assert rows[0].translation == "എളവുങ്കൽ"
+
+
+def test_memory_beats_the_glossary_on_the_same_cell(monkeypatch) -> None:
+    """A whole cell the operator approved outranks re-deriving it from phrases."""
+    monkeypatch.setattr(translate, "_run_engine", lambda *a, **k: pytest.fail("no model"))
+    rows = translate.translate_rows(
+        ["coconut oil"],
+        [("coconut oil", "വെളിച്ചെണ്ണ")],
+        memory=_memory(("coconut oil", "REMEMBERED")),
+    )
+    assert rows[0].translation == "REMEMBERED"
+    assert rows[0].from_memory and not rows[0].glossary_only
+
+
+def test_a_remembered_row_is_not_flagged_as_an_unverifiable_short_cell() -> None:
+    """NEXT.md 1.6 flags one-word cells because nothing can vouch for them.
+
+    A remembered cell is the one cell on the sheet that *is* vouched for, so
+    flagging it would be exactly backwards — and on a member list it would bury
+    the rows that genuinely need an eye.
+    """
+    rows = translate.translate_rows(
+        ["Standee"], [], memory=_memory(("Standee", "സ്റ്റാൻഡി"))
+    )
+    assert rows[0].problems == []
+    assert rows[0].checks == []
+    assert rows[0].warnings == []
+
+
+def test_an_empty_memory_changes_nothing(monkeypatch) -> None:
+    """The default path must be byte-identical to before the feature existed."""
+    monkeypatch.setattr(translate, "_run_engine", lambda e, texts, *a, **k: list(texts))
+    without = translate.translate_rows(["Some product"], [])
+    with_empty = translate.translate_rows(["Some product"], [], memory={})
+    assert without[0].translation == with_empty[0].translation
+    assert not with_empty[0].from_memory
+
+
+def test_a_blank_remembered_value_is_ignored(monkeypatch) -> None:
+    """An empty target must not blank a cell — it falls through to the model."""
+    monkeypatch.setattr(translate, "_run_engine", lambda e, texts, *a, **k: ["ഉൽപ്പന്നം"])
+    rows = translate.translate_rows(["Product"], [], memory={"product": ""})
+    assert not rows[0].from_memory
+    assert rows[0].translation == "ഉൽപ്പന്നം"
+
+
+def test_only_the_remembered_rows_skip_the_model(monkeypatch) -> None:
+    """A mixed sheet is the real case: the model must still see the rest, and
+    every row must come back in its original position."""
+    seen: list[list[str]] = []
+
+    def fake(engine, texts, *a, **k):
+        seen.append(list(texts))
+        return ["ഉൽപ്പന്നം"] * len(texts)
+
+    monkeypatch.setattr(translate, "_run_engine", fake)
+    rows = translate.translate_rows(
+        ["Known", "Unknown", "Known too"],
+        [],
+        memory=_memory(("Known", "അറിയാം"), ("Known too", "ഇതും")),
+    )
+    assert seen == [["Unknown"]]
+    assert [r.translation for r in rows] == ["അറിയാം", "ഉൽപ്പന്നം", "ഇതും"]
+    assert [r.from_memory for r in rows] == [True, False, True]

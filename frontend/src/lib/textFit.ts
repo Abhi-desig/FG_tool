@@ -12,7 +12,15 @@
  * 1 em, and `features/posters.fit_block` applies the same shrink-then-wrap rule
  * to them. The constants below are deliberately duplicated there and must stay
  * in step — that pairing is what makes the preview, the PNG proof and the
- * exported SVG agree on where the text breaks.
+ * exported SVG agree on where the text breaks. They are no longer duplicated on
+ * trust: `test_both_copies_of_the_fitter_use_the_same_constants` parses this
+ * file and compares them.
+ *
+ * **What travels is the width that will be *drawn*, not the natural width.** It
+ * includes the block's letter spacing and text case, because the string
+ * measured here is the string that gets rendered. `fit_block` must therefore
+ * not add tracking to a supplied measurement a second time — see the matching
+ * note on `CheckRequest.measured` in `backend/api/posters.py`.
  */
 
 import type { CanvasPreset, PosterBlock } from "@/lib/api"
@@ -31,11 +39,50 @@ export const SIZE_SCALE: Record<string, number> = {
 /** Mirrors `posters.MIN_FIT_SCALE`. Below this it wraps instead of shrinking. */
 const MIN_FIT_SCALE = 0.6
 
-/** Mirrors `posters.LINE_HEIGHT`. */
+/**
+ * Mirrors `posters.LINE_HEIGHT`. The *default* line spacing — a block may carry
+ * its own `leading`. Kept exported: `posterPng` and `PosterDesigner` both read
+ * it, and the constants test pins it to the Python value.
+ */
 export const LINE_HEIGHT = 1.25
 
 /** Mirrors the step count in `posters.fit_block`, so both pick the same size. */
 const WRAP_STEPS = 40
+
+/**
+ * Text height as a fraction of canvas height. Mirrors `posters.size_fraction`.
+ *
+ * The four size buckets survive as presets over a number: replacing them would
+ * touch the Pydantic Literal, the AI's fallback placement, the published
+ * presets and a golden fixture, for a cosmetic win.
+ */
+export function sizeFraction(block: PosterBlock): number {
+  const fraction = block.size_fraction
+  if (fraction != null && fraction > 0) return fraction
+  return SIZE_SCALE[block.size] ?? 0.055
+}
+
+/** Line spacing for one block, falling back to the shared default. */
+export function leadingOf(block: PosterBlock): number {
+  return block.leading ?? LINE_HEIGHT
+}
+
+/** Letter spacing for one block, in ems. */
+export function trackingOf(block: PosterBlock): number {
+  return block.tracking ?? 0
+}
+
+/**
+ * Apply the block's text case. Mirrors `posters.cased`.
+ *
+ * Done here rather than with CSS `text-transform` so the preview, the PNG proof
+ * and the SVG all draw the same characters — and so the measurement below
+ * measures what is actually drawn. Malayalam is unicameral, so this is a no-op
+ * on it.
+ */
+export function applyCase(text: string, textCase?: string): string {
+  return textCase === "upper" ? text.toUpperCase() : text
+}
 
 /** Measuring at a large size keeps rounding out of the em ratio. */
 const MEASURE_PX = 200
@@ -55,18 +102,30 @@ function context(): CanvasRenderingContext2D | null {
  * for the caller to leave the server on its own estimate rather than send a
  * number it made up.
  */
-export function measureEm(text: string, bold: boolean): number | null {
+export function measureEm(text: string, bold: boolean, tracking = 0): number | null {
   const c = context()
   if (!c) return null
   c.font = `${bold ? 700 : 400} ${MEASURE_PX}px "Noto Sans Malayalam", sans-serif`
-  return c.measureText(text).width / MEASURE_PX
+  const natural = c.measureText(text).width / MEASURE_PX
+  // Added, never measured: Canvas2D `letterSpacing` is not universally
+  // available and Python has no shaping engine at all, so arithmetic is the
+  // only rule both copies of the fitter can follow identically. The full
+  // character count, not count - 1: CSS and SVG add spacing after the last
+  // character too.
+  return natural + tracking * text.length
 }
 
 /** Every block measured at 1 em, keyed by id — the payload the server wants. */
 export function measureBlocks(blocks: PosterBlock[]): Record<string, number> {
   const out: Record<string, number> = {}
   for (const block of blocks) {
-    const em = measureEm(block.text, block.weight === "bold")
+    // The string that will actually be drawn, so the server never re-derives
+    // case or re-adds tracking.
+    const em = measureEm(
+      applyCase(block.text, block.case),
+      block.weight === "bold",
+      trackingOf(block),
+    )
     if (em !== null && em > 0) out[block.id] = em
   }
   return out
@@ -89,12 +148,15 @@ export interface FittedBlock {
    * amount of dragging helps. This is what stops an export.
    */
   overflows: boolean
+  /** Line spacing actually used, so nothing downstream re-derives it. */
+  leading: number
 }
 
 function wrapTo(
   text: string,
   limitEm: number,
   bold: boolean,
+  tracking = 0,
 ): { lines: string[]; widest: number } {
   const words = text.split(/\s+/).filter(Boolean)
   if (words.length === 0) return { lines: [text], widest: 0 }
@@ -103,7 +165,7 @@ function wrapTo(
   let current = ""
   for (const word of words) {
     const candidate = current ? `${current} ${word}` : word
-    if (current && (measureEm(candidate, bold) ?? 0) > limitEm) {
+    if (current && (measureEm(candidate, bold, tracking) ?? 0) > limitEm) {
       lines.push(current)
       current = word
     } else {
@@ -112,7 +174,7 @@ function wrapTo(
   }
   if (current) lines.push(current)
 
-  const widest = Math.max(...lines.map((l) => measureEm(l, bold) ?? 0))
+  const widest = Math.max(...lines.map((l) => measureEm(l, bold, tracking) ?? 0))
   return { lines, widest }
 }
 
@@ -124,9 +186,13 @@ function wrapTo(
  * longer reads as the size that was picked — does the text wrap instead.
  */
 export function fitBlock(block: PosterBlock, preset: CanvasPreset): FittedBlock {
-  const requestedPx = (SIZE_SCALE[block.size] ?? 0.055) * preset.height_px
+  const requestedPx = sizeFraction(block) * preset.height_px
   const bold = block.weight === "bold"
-  const totalEm = measureEm(block.text, bold) ?? 0
+  const tracking = trackingOf(block)
+  const leading = leadingOf(block)
+  // Cased once, and used for every wrap and every returned line.
+  const source = applyCase(block.text, block.case)
+  const totalEm = measureEm(source, bold, tracking) ?? 0
 
   // The box, or the safe zone, whichever bites first — a block may not be
   // rescued by growing out past the trim.
@@ -137,11 +203,12 @@ export function fitBlock(block: PosterBlock, preset: CanvasPreset): FittedBlock 
   const single = (fontPx: number, scale: number, shrunk: boolean): FittedBlock => ({
     fontPx,
     scale,
-    lines: [block.text],
+    lines: [source],
     shrunk,
     wrapped: false,
     overBox: false,
     overflows: false,
+    leading,
   })
 
   if (totalEm <= 0) return single(requestedPx, 1, false)
@@ -155,7 +222,7 @@ export function fitBlock(block: PosterBlock, preset: CanvasPreset): FittedBlock 
   for (let step = 0; step <= WRAP_STEPS; step++) {
     const trial = 1 - (step * (1 - MIN_FIT_SCALE)) / WRAP_STEPS
     const fontPx = requestedPx * trial
-    const { lines, widest } = wrapTo(block.text, limitPx / fontPx, bold)
+    const { lines, widest } = wrapTo(source, limitPx / fontPx, bold, tracking)
     if (widest * fontPx <= limitPx) {
       return {
         fontPx,
@@ -165,6 +232,7 @@ export function fitBlock(block: PosterBlock, preset: CanvasPreset): FittedBlock 
         wrapped: lines.length > 1,
         overBox: false,
         overflows: false,
+        leading,
       }
     }
   }
@@ -172,7 +240,7 @@ export function fitBlock(block: PosterBlock, preset: CanvasPreset): FittedBlock 
   // One word is wider than the box even at the smallest allowed size. Whether
   // that matters depends on which edge it passes — see FittedBlock.
   const fontPx = requestedPx * MIN_FIT_SCALE
-  const { lines, widest } = wrapTo(block.text, limitPx / fontPx, bold)
+  const { lines, widest } = wrapTo(source, limitPx / fontPx, bold, tracking)
   const width = (widest * fontPx) / preset.width_px
   return {
     fontPx,
@@ -182,6 +250,7 @@ export function fitBlock(block: PosterBlock, preset: CanvasPreset): FittedBlock 
     wrapped: lines.length > 1,
     overBox: true,
     overflows: width > 1 - 2 * insetX,
+    leading,
   }
 }
 

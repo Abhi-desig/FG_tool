@@ -14,10 +14,14 @@ import {
 } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Textarea } from "@/components/ui/textarea"
+import { contrastRatio, contrastVerdict } from "@/lib/contrast"
+import { useConfirm } from "@/lib/useConfirm"
 import {
+  type BlockAlign,
   type BlockSize,
   type DesignStyle,
   type StyleTextDefault,
+  type TextCase,
   deleteStyle,
   listStyles,
   restoreStyleDefault,
@@ -33,6 +37,22 @@ const ROLES: { key: "headline" | "offer" | "occasion" | "phone"; label: string }
 ]
 
 const SIZES: BlockSize[] = ["small", "medium", "large", "huge"]
+
+/** Mirrors `posters.SIZE_SCALE`, for the preview only — nothing exports from here. */
+const SIZE_FRACTION: Record<string, number> = {
+  small: 0.035,
+  medium: 0.055,
+  large: 0.085,
+  huge: 0.135,
+}
+
+/** Real words, so the preview shows what a Malayalam poster actually looks like. */
+const SAMPLE: Record<string, string> = {
+  headline: "ഓണം ഓഫർ",
+  offer: "50% OFF",
+  occasion: "Onam 2026",
+  phone: "9847 000 000",
+}
 
 const BLANK: Omit<DesignStyle, "id" | "is_default" | "sort_order" | "updated_at"> = {
   key: "",
@@ -82,6 +102,9 @@ export function PosterStyles() {
   const [required, setRequired] = useState<string[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [draft, setDraft] = useState(BLANK)
+  /** Which role's controls are showing. See the note by the chips below. */
+  const [openRole, setOpenRole] = useState<(typeof ROLES)[number]["key"]>("headline")
+  const { pending: deletePending, confirm: confirmDelete } = useConfirm()
   const [problems, setProblems] = useState<string[]>([])
   const [dirty, setDirty] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -291,41 +314,276 @@ export function PosterStyles() {
               className="h-9 w-full p-1"
             />
           </div>
-          {ROLES.map((role) => (
-            <div key={role.key} className="space-y-1.5">
-              <Label
-                htmlFor={`style-${role.key}`}
-                className="text-xs font-normal text-muted-foreground"
-              >
-                {role.label}
-              </Label>
-              <div className="flex gap-2">
-                <Input
-                  id={`style-${role.key}`}
-                  type="color"
-                  value={draft.text_defaults[role.key]?.colour ?? "#ffffff"}
-                  onChange={(e) => editRole(role.key, { colour: e.target.value })}
-                  className="h-9 w-14 p-1"
-                />
-                <Select
-                  value={draft.text_defaults[role.key]?.size ?? "medium"}
-                  onValueChange={(v) => editRole(role.key, { size: v as BlockSize })}
+        </div>
+      </div>
+
+      {/*
+        A look is judged by eye, not by reading eight numbers. Built from the
+        same helpers the designer's stage uses (`cqh` units inside a
+        `containerType: size` box), so the proportions here are the proportions
+        on the page.
+      */}
+      <div className="space-y-1.5">
+        <Label>Preview</Label>
+        <div
+          className="mx-auto w-full max-w-[240px] overflow-hidden rounded-lg border"
+          style={{
+            aspectRatio: "210 / 297",
+            containerType: "size",
+            background: draft.text_defaults.background_colour ?? "#1b1b22",
+          }}
+        >
+          <div className="flex h-full flex-col justify-center gap-[2cqh] px-[6cqw]">
+            {ROLES.map((role) => {
+              const spec = draft.text_defaults[role.key] ?? {}
+              const fraction =
+                spec.size_fraction ?? SIZE_FRACTION[spec.size ?? "medium"] ?? 0.055
+              return (
+                <div
+                  key={role.key}
+                  className="malayalam truncate"
+                  style={{
+                    color: spec.colour ?? "#ffffff",
+                    fontSize: `${fraction * 100}cqh`,
+                    fontWeight: spec.weight === "bold" ? 700 : 400,
+                    letterSpacing: `${spec.tracking ?? 0}em`,
+                    lineHeight: spec.leading ?? 1.25,
+                    textAlign:
+                      spec.align === "left"
+                        ? "left"
+                        : spec.align === "right"
+                          ? "right"
+                          : "center",
+                  }}
                 >
-                  <SelectTrigger aria-label={`${role.label} size`} className="flex-1">
+                  {spec.case === "upper"
+                    ? SAMPLE[role.key].toUpperCase()
+                    : SAMPLE[role.key]}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          A4 proportions, sample words. This is how the look reads — it is not a
+          fit check, because no canvas is chosen here.
+        </p>
+      </div>
+
+      {/*
+        One role at a time. Eight controls across four roles is thirty-two, and
+        flat that buries the colour and size the operator actually came for —
+        while the preview above shows all four together, which is what they need
+        to judge.
+
+        The chips reuse the `aria-pressed` pattern the style list above already
+        uses, so nothing new had to be built for them.
+      */}
+      <div className="space-y-3">
+        <div className="flex flex-wrap gap-2" role="group" aria-label="Which line to style">
+          {ROLES.map((role) => (
+            <button
+              key={role.key}
+              type="button"
+              aria-pressed={openRole === role.key}
+              onClick={() => setOpenRole(role.key)}
+              className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                openRole === role.key
+                  ? "border-primary bg-accent font-medium"
+                  : "border-border hover:border-primary/50"
+              }`}
+            >
+              {role.label}
+            </button>
+          ))}
+        </div>
+
+        {(() => {
+          const role = ROLES.find((r) => r.key === openRole) ?? ROLES[0]
+          const spec = draft.text_defaults[role.key] ?? {}
+          const background = draft.text_defaults.background_colour ?? "#1b1b22"
+          const ratio = contrastRatio(spec.colour ?? "#ffffff", background)
+          const groupId = `style-role-${role.key}`
+          return (
+            <div
+              role="group"
+              aria-labelledby={groupId}
+              className="space-y-3 rounded-lg border p-3"
+            >
+              <p id={groupId} className="text-sm font-medium">
+                {role.label}
+              </p>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor={`style-${role.key}`}>Colour</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id={`style-${role.key}`}
+                      type="color"
+                      value={spec.colour ?? "#ffffff"}
+                      onChange={(e) => editRole(role.key, { colour: e.target.value })}
+                      className="h-9 w-14 p-1"
+                    />
+                    {/* Paired with a text field so a brand hex can be pasted. */}
+                    <Input
+                      aria-label={`${role.label} colour as hex`}
+                      value={spec.colour ?? "#ffffff"}
+                      onChange={(e) => editRole(role.key, { colour: e.target.value })}
+                      className="h-9 flex-1 font-mono text-xs"
+                    />
+                  </div>
+                  {ratio !== null && (
+                    <p
+                      className={`text-xs ${
+                        ratio >= 4.5
+                          ? "text-muted-foreground"
+                          : "text-[color:var(--warn)]"
+                      }`}
+                    >
+                      {contrastVerdict(ratio)} against this style's background.
+                    </p>
+                  )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor={`style-${role.key}-size`}>Size</Label>
+                  <Select
+                    value={spec.size ?? "medium"}
+                    onValueChange={(v) =>
+                      // Choosing a preset clears any exact size, so the two
+                      // controls never disagree about which is in force.
+                      editRole(role.key, { size: v as BlockSize, size_fraction: null })
+                    }
+                  >
+                    <SelectTrigger id={`style-${role.key}-size`}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {SIZES.map((sz) => (
+                        <SelectItem key={sz} value={sz}>
+                          {sz}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor={`style-${role.key}-weight`}>Weight</Label>
+                  <Select
+                    value={spec.weight ?? "regular"}
+                    onValueChange={(v) =>
+                      editRole(role.key, { weight: v as "regular" | "bold" })
+                    }
+                  >
+                    <SelectTrigger id={`style-${role.key}-weight`}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="regular">Regular</SelectItem>
+                      <SelectItem value="bold">Bold</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor={`style-${role.key}-align`}>Align</Label>
+                  <Select
+                    value={spec.align ?? "centre"}
+                    onValueChange={(v) =>
+                      editRole(role.key, { align: v as BlockAlign })
+                    }
+                  >
+                    <SelectTrigger id={`style-${role.key}-align`}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="left">Left</SelectItem>
+                      <SelectItem value="centre">Centre</SelectItem>
+                      <SelectItem value="right">Right</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor={`style-${role.key}-pct`}>Exact size %</Label>
+                  <Input
+                    id={`style-${role.key}-pct`}
+                    type="number"
+                    min={1}
+                    max={40}
+                    step={0.5}
+                    placeholder="preset"
+                    value={
+                      spec.size_fraction != null
+                        ? Number((spec.size_fraction * 100).toFixed(1))
+                        : ""
+                    }
+                    onChange={(e) =>
+                      editRole(role.key, {
+                        size_fraction:
+                          e.target.value.trim() === ""
+                            ? null
+                            : Number(e.target.value) / 100,
+                      })
+                    }
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor={`style-${role.key}-tracking`}>Letter spacing</Label>
+                  <Input
+                    id={`style-${role.key}-tracking`}
+                    type="number"
+                    min={-0.05}
+                    max={0.5}
+                    step={0.01}
+                    value={spec.tracking ?? 0}
+                    onChange={(e) =>
+                      editRole(role.key, { tracking: Number(e.target.value) })
+                    }
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor={`style-${role.key}-leading`}>Line spacing</Label>
+                  <Input
+                    id={`style-${role.key}-leading`}
+                    type="number"
+                    min={0.8}
+                    max={3}
+                    step={0.05}
+                    value={spec.leading ?? 1.25}
+                    onChange={(e) =>
+                      editRole(role.key, { leading: Number(e.target.value) })
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor={`style-${role.key}-case`}>Letter case</Label>
+                <Select
+                  value={spec.case ?? "as-typed"}
+                  onValueChange={(v) => editRole(role.key, { case: v as TextCase })}
+                >
+                  <SelectTrigger id={`style-${role.key}-case`}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {SIZES.map((s) => (
-                      <SelectItem key={s} value={s}>
-                        {s}
-                      </SelectItem>
-                    ))}
+                    <SelectItem value="as-typed">As typed</SelectItem>
+                    <SelectItem value="upper">UPPERCASE</SelectItem>
                   </SelectContent>
                 </Select>
+                <p className="text-xs text-muted-foreground">
+                  Malayalam has no capitals, so this changes nothing there.
+                </p>
               </div>
             </div>
-          ))}
-        </div>
+          )
+        })()}
       </div>
 
       <Separator />
@@ -383,12 +641,14 @@ export function PosterStyles() {
           <Button
             variant="ghost"
             onClick={async () => {
+              // A shop-added look is not restorable — only shipped ones are.
+              if (!confirmDelete(selected.id)) return
               await deleteStyle(selected.id)
               await refresh()
               toast.success("Style removed")
             }}
           >
-            Delete
+            {deletePending === selected.id ? "Click again to delete" : "Delete"}
           </Button>
         )}
         {creating && (

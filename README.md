@@ -153,6 +153,34 @@ git add -f frontend/dist
 uv run python scripts/check_release.py
 ```
 
+Or run every check at once — ruff, the test suite, TypeScript, the linter and the release
+check — with one command. A gate that could not run is reported as a **skip**, never folded
+into a pass:
+
+```bash
+uv run python scripts/qc.py
+```
+
+## Giving it to the shop PC
+
+The shop PC has no Node, no git and no build step — it runs the *built* UI out of
+`frontend/dist`. Build the folder it needs as one zip:
+
+```bash
+cd frontend && npm run build && cd ..
+git add -f frontend/dist
+uv run python scripts/package_windows.py
+```
+
+That writes `dist/FocusToolkit-windows.zip`. Copy it over, unzip it, and open
+`START-HERE.txt` — it walks the operator through installing uv, the one-off
+`first-time-setup.bat`, and then `start.bat` from then on.
+
+The package deliberately contains **no** `.env`, no `*.db` and no `models/`:
+API keys are typed into Settings on that machine, the database is created on
+first run, and the model weights download on first use. Packaging refuses to
+run if `frontend/dist` is stale, for the same reason `check_release.py` exists.
+
 **Run the check before every push.** It fails when the committed bundle is not the built one, which
 is not hypothetical: `519de89` changed ~2,000 lines of frontend and never re-added `dist`, so the
 tracked bundle stayed the pre-Phase-5 UI with no AI screens in it, and nothing reported it. The
@@ -198,6 +226,7 @@ Read these before changing anything — they are the project's context bible.
 | [SECURITY.md](SECURITY.md) | Key handling, input validation, what is out of scope and why |
 | [LICENSES.md](LICENSES.md) | Licence register and hard bans — matters, you sell the output |
 | [DECISIONS.md](DECISIONS.md) | Why each choice was made, with evidence |
+| [QC.md](QC.md) | Every control to click before handing work over, and the loop |
 | [CLAUDE.md](CLAUDE.md) | Standing orders for AI coding sessions |
 
 ---

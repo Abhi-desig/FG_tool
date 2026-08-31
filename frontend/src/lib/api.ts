@@ -351,6 +351,17 @@ export interface GlossaryTerm {
   notes?: string
 }
 
+/** What the optional Claude check would cost on this sheet, before running it. */
+export interface VerifyQuote {
+  rows: number
+  model: string
+  requests: number
+  cost_paise: number
+  cost_rupees: number
+  configured: boolean
+  is_estimate: boolean
+}
+
 export interface SheetInfo {
   sheets: string[]
   total_cells: number
@@ -359,6 +370,13 @@ export interface SheetInfo {
   skipped_formulas: number
   skipped_non_text: number
   engine: string | null
+  /** Cells already approved on an earlier sheet — free and offline. */
+  from_memory?: number
+  /** Cells the client's glossary covers entirely. Also free and offline. */
+  from_glossary?: number
+  /** What is actually left for the model, and what the quote is based on. */
+  to_translate?: number
+  verify?: VerifyQuote
 }
 
 export interface ReviewRow {
@@ -369,6 +387,8 @@ export interface ReviewRow {
   translation: string
   glossary_terms: string[]
   glossary_only: boolean
+  /** Filled from a correction the operator approved on an earlier sheet. */
+  from_memory?: boolean
   lost_terms: string[]
   /** `problems` then `checks`, flat — kept for anything reading the old shape. */
   warnings: string[]
@@ -378,6 +398,28 @@ export interface ReviewRow {
   /** Nothing can vouch for it — chiefly short cells. See features/translate.py. */
   checks: string[]
   must_fix: boolean
+  /** What the offline model produced, kept even where Claude replaced it. */
+  offline_translation?: string
+  /** Whether Claude looked at this row at all. */
+  checked?: boolean
+  /** Whether Claude replaced what the offline model produced. */
+  verify_corrected?: boolean
+  verify_note?: string
+}
+
+/** How the optional Claude check went. `requested: false` when it was not run. */
+export interface ReviewSummary {
+  requested: boolean
+  model?: string
+  checked?: number
+  corrected?: number
+  unchecked?: number
+  cost_paise?: number
+  cost_rupees?: number
+  error?: string | null
+  warnings?: string[]
+  /** Rows not sent because they were already exact — glossary or memory. */
+  skipped_exact?: number
 }
 
 export interface TranslationResult {
@@ -387,9 +429,13 @@ export interface TranslationResult {
   needs_attention: number
   must_fix: number
   from_glossary: number
+  /** Rows filled from the corrections memory, so never sent anywhere. */
+  from_memory?: number
   /** False when the sheet was translated with no glossary in force. */
   glossary_applied: boolean
   glossary_terms: number
+  review?: ReviewSummary
+  verify_corrected?: number
 }
 
 export interface EngineRow {
@@ -463,33 +509,162 @@ export async function deleteTerm(
   )
 }
 
-export function inspectSheet(file: File): Promise<SheetInfo> {
-  const form = new FormData()
-  form.append("file", file)
-  return upload<SheetInfo>("/api/excel/inspect", form)
-}
-
-export function startTranslate(file: File, clientId: number | null): Promise<Job> {
+/**
+ * What is in this sheet, and what checking it would cost.
+ *
+ * `clientId` is what makes the quote true: without it the estimate counts rows
+ * the glossary and the corrections memory already cover and that never reach
+ * the model. Re-inspect when the operator changes the client.
+ */
+export function inspectSheet(file: File, clientId: number | null = null): Promise<SheetInfo> {
   const form = new FormData()
   form.append("file", file)
   if (clientId != null) form.append("client_id", String(clientId))
+  return upload<SheetInfo>("/api/excel/inspect", form)
+}
+
+export function startTranslate(
+  file: File,
+  clientId: number | null,
+  options: { checkWithClaude?: boolean; overBudgetOk?: boolean } = {},
+): Promise<Job> {
+  const form = new FormData()
+  form.append("file", file)
+  if (clientId != null) form.append("client_id", String(clientId))
+  // Only sent when true, so an older server that does not know the field is
+  // unaffected by the ordinary offline path.
+  if (options.checkWithClaude) form.append("check_with_claude", "true")
+  if (options.overBudgetOk) form.append("over_budget_ok", "true")
   return upload<Job>("/api/excel/translate", form)
 }
 
-/** Export is a file download, so it bypasses the JSON request helper. */
+/**
+ * Export is a file download, so it bypasses the JSON request helper.
+ *
+ * Also the moment the shop learns: the server compares the operator's final
+ * text against what the offline model produced and remembers the differences.
+ * `remembered` is how many corrections that was — read from a response header
+ * rather than a second round trip, which could fail and leave the learning
+ * unexplained.
+ */
 export async function exportSheet(
   jobId: string,
   translations: Record<string, string>,
-): Promise<Blob> {
+  options: { remember?: boolean; clientId?: number | null } = {},
+): Promise<{ blob: Blob; remembered: number }> {
   const response = await fetch("/api/excel/export", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ job_id: jobId, translations }),
+    body: JSON.stringify({
+      job_id: jobId,
+      translations,
+      remember: options.remember !== false,
+      client_id: options.clientId ?? null,
+    }),
   })
   if (!response.ok) {
     throw new ApiError(`Export failed (${response.status})`, response.status)
   }
+  const remembered = Number(response.headers.get("X-Corrections-Remembered") ?? "0")
+  return { blob: await response.blob(), remembered: Number.isFinite(remembered) ? remembered : 0 }
+}
+
+// --- the corrections memory (ADR-029) -------------------------------------
+
+export interface Correction {
+  id: number
+  client_id: number | null
+  source: string
+  target: string
+  /** "operator" when they typed it, "claude-kept" when they kept a paid one. */
+  origin: string
+  learned_from: string
+  updated_at: string
+}
+
+export interface CorrectionsPage {
+  client_id: number | null
+  corrections: Correction[]
+  count: number
+  /** Every match, not just this page — the list is always paginated. */
+  total: number
+}
+
+export interface CorrectionImport {
+  added: number
+  updated: number
+  skipped: number
+  rows: number
+  truncated: boolean
+  blank_rows: number
+  total: number
+}
+
+export function listCorrections(options: {
+  clientId: number | null
+  q?: string
+  limit?: number
+  offset?: number
+}): Promise<CorrectionsPage> {
+  const params = new URLSearchParams()
+  if (options.clientId != null) params.set("client_id", String(options.clientId))
+  if (options.q) params.set("q", options.q)
+  params.set("limit", String(options.limit ?? 100))
+  params.set("offset", String(options.offset ?? 0))
+  return request(`/api/corrections?${params}`)
+}
+
+export function putCorrections(
+  clientId: number | null,
+  corrections: { source: string; target: string }[],
+): Promise<CorrectionsPage> {
+  return request("/api/corrections", {
+    method: "PUT",
+    body: JSON.stringify({ client_id: clientId, corrections }),
+  })
+}
+
+export function deleteCorrection(
+  id: number,
+  clientId: number | null,
+): Promise<CorrectionsPage> {
+  const params = clientId == null ? "" : `?client_id=${clientId}`
+  return request(`/api/corrections/${id}${params}`, { method: "DELETE" })
+}
+
+export function importCorrections(
+  file: File,
+  clientId: number | null,
+): Promise<CorrectionImport> {
+  const form = new FormData()
+  form.append("file", file)
+  if (clientId != null) form.append("client_id", String(clientId))
+  return upload<CorrectionImport>("/api/corrections/import", form)
+}
+
+/**
+ * The memory as a spreadsheet.
+ *
+ * Returns a Blob rather than a URL so this stays the only place that talks to
+ * the server — a component with its own `<a href="/api/...">` is the drift the
+ * fetch layer exists to prevent.
+ */
+export async function downloadCorrections(clientId: number | null): Promise<Blob> {
+  const params = clientId == null ? "" : `?client_id=${clientId}`
+  const response = await fetch(`/api/corrections/export${params}`)
+  if (!response.ok) {
+    throw new ApiError(`Download failed (${response.status})`, response.status)
+  }
   return response.blob()
+}
+
+export function forgetJobCorrections(
+  jobId: string,
+): Promise<{ forgotten: number; total: number }> {
+  return request("/api/corrections/forget-job", {
+    method: "POST",
+    body: JSON.stringify({ job_id: jobId }),
+  })
 }
 
 export function translationSettings(): Promise<{
@@ -521,6 +696,10 @@ export interface CanvasPreset {
 /** What a line *is* on the poster. A style colours the headline, not block `t3`. */
 export type BlockRole = "headline" | "offer" | "occasion" | "phone" | "free"
 
+/** "as typed" or shouted. Only two: Malayalam is unicameral, so title case is
+ * meaningless there and locale-dependent for Latin. */
+export type TextCase = "as-typed" | "upper"
+
 export interface PosterBlock {
   id: string
   text: string
@@ -528,9 +707,16 @@ export interface PosterBlock {
   y: number
   width: number
   size: BlockSize
+  /** Overrides `size` when set: text height as a fraction of canvas height. */
+  size_fraction: number | null
   weight: "regular" | "bold"
+  /** Letter spacing in ems. */
+  tracking: number
+  /** Line spacing as a multiple of font size. */
+  leading: number
   colour: string
   align: BlockAlign
+  case: TextCase
   mode: TextMode
   shadow: boolean
   role: BlockRole
@@ -641,7 +827,11 @@ export async function posterSvg(
 
 // --- Phase 5: AI ----------------------------------------------------------
 
-export type AiFeature = "photo-edit" | "poster-artwork" | "poster-layout"
+export type AiFeature =
+  | "photo-edit"
+  | "poster-artwork"
+  | "poster-layout"
+  | "poster-copy"
 
 export interface KeyRow {
   name: string
@@ -849,11 +1039,23 @@ export function artworkPrompt(body: ArtworkRequest): Promise<{
 // --- design styles --------------------------------------------------------
 
 /** How the words are styled when a look is chosen. Half a style is not a style. */
+/**
+ * One role's look inside a saved style.
+ *
+ * Every field is optional on the wire because styles saved before typography
+ * existed carry only colour, size and weight. The server fills the rest in on
+ * read (`styles.normalise_text_defaults`), which is what made this need no
+ * database migration.
+ */
 export interface StyleTextDefault {
   colour?: string
   size?: BlockSize
+  size_fraction?: number | null
   weight?: "regular" | "bold"
+  tracking?: number
+  leading?: number
   align?: BlockAlign
+  case?: TextCase
 }
 
 export interface StyleTextDefaults {
@@ -950,5 +1152,103 @@ export function setAiModels(
   return request("/api/ai/models", {
     method: "PUT",
     body: JSON.stringify(choices),
+  })
+}
+
+
+// --- the AI writes the poster's words (ADR-030) ---------------------------
+
+export interface CopyBlock {
+  id: BlockRole
+  text: string
+}
+
+export interface CopyAlternative {
+  id: string
+  label: string
+  /** English. */
+  blocks: CopyBlock[]
+  /** The same lines in Malayalam. Always real Unicode, never transliteration. */
+  blocks_ml: CopyBlock[]
+}
+
+export interface CopyRequest {
+  brief: string
+  occasion?: string
+  tone?: string
+  shop?: string
+  /** Lines you have committed to. Sent as "must stay exactly as written". */
+  keep_headline?: string
+  keep_offer?: string
+  keep_occasion?: string
+  /** Never sent to Google — put back locally after the call. */
+  phone?: string
+  over_budget_ok?: boolean
+}
+
+export interface CopyResult extends AiResult {
+  alternatives?: CopyAlternative[]
+}
+
+export function writeCopy(body: CopyRequest): Promise<CopyResult> {
+  return request("/api/ai/copy", { method: "POST", body: JSON.stringify(body) })
+}
+
+/** Free. The exact words that would be sent, so nothing about it is hidden. */
+export function copyPrompt(body: CopyRequest): Promise<{
+  prompt: string
+  estimate: { cost_paise: number; cost_rupees: number; model: string }
+}> {
+  return request("/api/ai/copy/prompt", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+// --- the two routes that shipped without a caller -------------------------
+//
+// Both were fully implemented on the server and had no wrapper here, so the
+// features they back were only half-reachable.
+
+export interface CalmRegion {
+  x: number
+  y: number
+  width: number
+  height: number
+  /** 0–1. Lower is quieter, and quieter is where words stay readable. */
+  busyness: number
+  mean_luminance: number
+}
+
+/** Where a background picture is quiet enough to put words. Offline and free. */
+export function analysePoster(file: File): Promise<{
+  width: number
+  height: number
+  calm_regions: CalmRegion[]
+}> {
+  const form = new FormData()
+  form.append("file", file)
+  return upload("/api/posters/analyse", form)
+}
+
+export interface LayoutPlanRequest {
+  headline: string
+  offer?: string
+  occasion?: string
+  phone?: string
+  tone?: string
+  over_budget_ok?: boolean
+}
+
+/**
+ * Ask the AI where the words should go. Positions only — never text.
+ *
+ * `verify_text_unchanged` on the server puts the operator's exact wording back
+ * if the model altered or dropped it, so this cannot change what the poster says.
+ */
+export function layoutPlan(body: LayoutPlanRequest): Promise<AiResult> {
+  return request("/api/ai/layout-plan", {
+    method: "POST",
+    body: JSON.stringify(body),
   })
 }

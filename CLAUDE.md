@@ -2,7 +2,7 @@
 
 Read on every request. Companion docs: [PRD](PRD.md) · [ARCHITECTURE](ARCHITECTURE.md) ·
 [SECURITY](SECURITY.md) · [DESIGN](DESIGN.md) · [ROADMAP](ROADMAP.md) · [LICENSES](LICENSES.md) ·
-[SETTINGS](SETTINGS.md) · [DECISIONS](DECISIONS.md)
+[SETTINGS](SETTINGS.md) · [DECISIONS](DECISIONS.md) · [QC](QC.md)
 
 ---
 
@@ -65,6 +65,15 @@ uv pip install --system                       any command touching models/ destr
   glossary substitution, the layout renderer. Do not chase coverage on glue code.
 - A passing test is not the exit gate. See [ROADMAP.md](ROADMAP.md) — most gates require checking
   real output in CorelDRAW or on a real print.
+- Before handing work over, run the whole gate in one command:
+
+  ```
+  uv run python scripts/qc.py
+  ```
+
+  It runs ruff, pytest, tsc, oxlint and the release check, and reports a **skip** as a third
+  state rather than folding it into a pass. Then walk [QC.md](QC.md) in the running app —
+  the things a machine cannot check.
 
 ## When unsure
 

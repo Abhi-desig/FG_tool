@@ -94,6 +94,8 @@ Licensing was never the blocker — the package being abandoned since 2013 was (
 | Fabric.js v6 | MIT | ✅ |
 | `google-genai` SDK | Apache-2.0 | ✅ |
 | Gemini API output | Google's terms — commercial use permitted | ✅ See watermark note |
+| `anthropic` SDK | MIT | ✅ |
+| Claude API output | Anthropic's terms — commercial use permitted, output is the customer's | ✅ |
 | fal.ai / Replicate | Per-service terms | ⚠️ Check before use — fallback only |
 
 ### Core stack
@@ -123,6 +125,12 @@ print use.
 
 Google embeds an invisible **SynthID watermark** in AI-generated images. It does not affect printing
 or ownership, but the operator should know before a client asks.
+
+**The Excel check sends client data off the machine.** It is the only feature that does. Where a
+poster prompt is the shop's own words, a member list is other people's names and home addresses, and
+the operator is the one holding that duty of care to their client. The panel says so before the job
+starts and the check is off unless deliberately chosen; numbers, dates and membership codes are
+never sent. See ADR-028.
 
 ---
 
