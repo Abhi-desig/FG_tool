@@ -679,6 +679,53 @@ types it; that is deliberate, and reversible by editing the prompt in Settings. 
 ADR-025, this is built but not proven against the live API — no test here makes a
 real call.
 
+## ADR-031 · A layout is data the app draws, never a description the model draws
+
+**Date:** 2026-09-02
+**Context:** Nineteen written art-direction templates were offered as poster styles,
+with a seven-step algorithm for choosing between them. The algorithm is sound. Every
+one of the templates, however, specifies typography *inside the image prompt* — "hero
+very large extra-bold warm gold Happy Onam", "small white caps widely tracked MNRE
+APPROVED". They also carry one client's copy hardcoded, and they are 4:5 social at
+screen resolution, not print.
+**Decision:** Adopt the **algorithm** — block ranking at a fixed 100:35:18:12 size
+ratio, a reserved zone stated as a percentage, one alignment axis per zone, a cap on
+shapes and colours — as a **layout preset**: local data, seeded in code beside
+`CANVAS_PRESETS`, drawn by `render_svg`. Reject the templates as prompts. **A shape
+the app can draw exactly is never asked of an image model.** Full specification in
+[POSTER_LAYOUTS.md](POSTER_LAYOUTS.md).
+**Reasoning:** Text in the picture cannot be edited, cannot be trusted to be spelled
+right, and cannot be Malayalam — which removes the shop's only real advantage over
+Canva (ADR-019, ADR-020). It would also be refused on save: `styles.validate()`
+rejects any body that does not forbid lettering (ADR-027), so the templates fail
+against this codebase before taste enters into it. And the geometry they specify — a
+letterbox from 26% to 74%, a seam at exactly 40%, four hairline rules — is stated to
+a precision no diffusion model honours and SVG honours exactly. Ranking is done
+locally too: the source algorithm asks a model to count and rank the copy blocks,
+which `split_copy` has done offline since Phase 4, with every guess shown and
+correctable.
+**Evidence:** Three claims in the source were checked against this repo and did not
+survive. Its "maximum four colours" rule counts the ground, which fails the shipped
+Festival style on day one — background plus four text colours in
+`styles.SEEDS`. Its 8% edge margin is larger than `Canvas.safe_mm` everywhere (2.4%
+on A4, 4.1% of the height on a 6×4 ft flex), so it is a design margin and must not
+overwrite the trim check. Its recency signal has nothing to score: posters are not
+saved and are not linked to a client — `db.py` has no poster table, and `clients`
+exists only to scope the glossary.
+**Consequences:** The layout AI call leaves the common path, so an ordinary poster
+costs nothing and works offline. Eight shape primitives and **mixed-size text runs**
+enter `render_svg` — the runs are the larger change, touching the fitter, both copies
+of the width estimator, and the browser measurement path, and they are worth building
+first because they improve every poster the shop makes today. Three of the eight
+primitives (gradient, clip path, filter) need one CorelDRAW import check before
+anything depends on them, added to QC.md; that is the same failure class as the
+unembedded font in NEXT.md 1.5, which imported silently wrong. Frosted glass is
+dropped for want of a `backdrop-filter` in SVG. Presets live in code rather than
+SQLite because a hand-edited prompt is recoverable and a hand-edited geometry
+misprints silently. One new style variable, `{{reserve}}`, which means a preset must
+be chosen *before* the artwork is generated. No new dependency, no schema migration.
+Phase 4's exit gate is unaffected and unmet — the real print still decides the margin.
+
 ## ADR-010 · Docs before code
 
 **Date:** 2026-08-22
