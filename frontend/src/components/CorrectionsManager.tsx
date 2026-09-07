@@ -32,6 +32,7 @@ import {
   listCorrections,
   putCorrections,
 } from "@/lib/api"
+import { saveFile } from "@/lib/saveFile"
 
 /** One page. There can be tens of thousands of these; the browser holds a page. */
 const PAGE = 100
@@ -153,13 +154,7 @@ export function CorrectionsManager() {
 
   const save_file = useCallback(async () => {
     try {
-      const blob = await downloadCorrections(clientId)
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement("a")
-      link.href = url
-      link.download = "corrections.xlsx"
-      link.click()
-      URL.revokeObjectURL(url)
+      saveFile(await downloadCorrections(clientId), "corrections.xlsx")
     } catch {
       toast.error("Could not download the corrections")
     }

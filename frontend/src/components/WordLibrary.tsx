@@ -22,6 +22,7 @@ import {
   putWordOverride,
   searchWords,
 } from "@/lib/api"
+import { saveFile } from "@/lib/saveFile"
 
 /** What the badge in the last column says, and how loud it is. */
 const ORIGIN: Record<WordOrigin, { label: string; variant: "default" | "secondary" | "outline" }> = {
@@ -97,13 +98,7 @@ export function WordLibrary() {
 
   const download = async () => {
     try {
-      const blob = await downloadWords()
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement("a")
-      link.href = url
-      link.download = "word-library.xlsx"
-      link.click()
-      URL.revokeObjectURL(url)
+      saveFile(await downloadWords(), "word-library.xlsx")
     } catch {
       toast.error("Could not download the word library")
     }
