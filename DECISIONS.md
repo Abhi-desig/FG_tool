@@ -936,6 +936,114 @@ still renders. Designs are files, not rows, so the operator edits them in any
 text editor and a new one needs no restart. No new dependency. Phase 5's exit
 gate is unchanged and still unmet: one real call has still never been made.
 
+## ADR-035 · A column is classified before anything is translated
+
+**Date:** 2026-09-07
+**Context:** Measured on a real employee sheet, the pipeline produced ~50 wrong
+cells and flagged 2. The wrongness was not the surprise — a 57M model on a
+member list will always produce some. The silence was. Every surface check
+passed, because the failures were *fluent*:
+
+    Vishnu Prasad   → വിഷ്ണുപുരാണം      the Vishnu Purana, a scripture
+    Sajeev Kumar    → സാജിദ് കുമാർ      a different person's name
+    Thekkeveettil   → ദ്വിതീയ            "secondary"
+    Driver          → ഗോൾഫിൽ ...വടി      a long stick for hitting a golf ball
+    IT              → നേരത്തേപറഞ്ഞകാര്യം  the pronoun "it"
+    Fathima Beevi   → ഫാത്തിമ ബീവിusa. kgm
+
+None of those is an error a better model avoids. A name has no meaning to find,
+and a model whose job is to find meaning will invent one.
+
+**Decision:** Classify every column *before* translating, and give each class
+its own route. Only `FREE_TEXT` reaches the model.
+
+| Class | Route |
+|---|---|
+| `PERSON_NAME` | name lexicon, then transliteration. Never the model |
+| `ADDRESS` | gazetteer → structural glossary → transliteration |
+| `CODE`, `NUMERIC_DATE` | untouched, and asserted untouched on export |
+| `CATEGORICAL` | the distinct values approved once into the client glossary |
+| `FREE_TEXT` | the model, framed and scored |
+
+The class is a **suggestion with a reason attached**, confirmed or overridden by
+the operator before the run. Guessing wrong is symmetrical — spelling a real
+word by sound is exactly as wrong as translating a name — so nothing is decided
+for them. Once the job starts the class is fixed; nothing reclassifies mid-run.
+
+**Three places the brief was wrong, and what replaced them.**
+
+*The categorical rule could not fire.* `distinct/total < 0.05` needs twenty
+repeats of every value. Department, the textbook case, is 10 distinct in 30
+cells — 0.33 — and on any sheet under ~200 rows the ratio floor is `1/n`. Two
+absolute conditions replace it: at most 40 distinct values, and fewer distinct
+than half the cells. Works on a 30-row sheet and a 33,000-row one.
+
+*Refusing every unresolved name would have made the address route useless.* The
+brief says an unresolved cell is shown untranslated. Applied literally that
+refuses every house name forever, because no gazetteer will ever hold
+`Thekkeveettil`. So the two failures are separated: a **wrong translation** is
+fluent and invisible, and is refused; an **uncertain transliteration** is the
+right operation with one vowel in doubt, and is written with a note asking the
+operator to read it. A cell only refuses outright when a residue token is an
+ordinary English word — the signal that the *class* is wrong, not the lexicon
+short.
+
+*Lowercasing before generation broke acronyms.* Measured:
+`the label reads: hr officer` lost the payload entirely, while
+`HR officer` returned HR ഓഫീസർ correctly. All-caps runs are held back and
+everything else folded.
+
+**Evidence.** A frozen gold set, `tests/golden/employee_gold.tsv`, judges the
+same 131 cells before and after by the same rules. Provable errors fell from
+**54 to 0**; of the 54, twenty-eight now refuse visibly and the rest translate.
+Flag recall on provable errors went from **0.07 to 1.00** — vacuously, since
+there are none left to catch, which is why the test that matters asserts the
+*before* cohort was fixed rather than quoting the ratio.
+
+**What that number does not cover, and it is the important caveat.** 99 of the
+131 cells are `unknown` — translated, plausibly right, and unverifiable by rule.
+An earlier draft of the gold set scored transliterations `ok` by construction and
+reported a perfect zero error rate, which measured nothing but its own
+assumption. Those rows are exactly what a Malayalam reader still has to mark, and
+until they do this change is proven only on the provable subset.
+
+**Consequences.** `features/columns.py` is new. `features/translit.py` gains the
+lexicon-backed routes and writes corrections back to its own files, so a
+corrected place fixes every address it appears in rather than one cell.
+`opus-mt-ml-en` is registered (Apache-2.0, licence checked) for the round-trip
+check, loaded only after the forward model is freed — one model at a time still
+holds. Five new plain-text assets ship in `data/names/` and `data/places/`. The
+beam scores and alternatives `generate` was already computing are now read
+instead of discarded. No new Python dependency.
+
+**The round-trip check raises nothing, and that is a measured decision.** It was
+built to flag on the similarity between a source and its back-translation.
+Measured against twelve cells whose correctness was already established, it
+**caught 0 of 3 real errors and flagged 1 of 9 correct cells**:
+
+    Price per kilogram   ok     -> "The Friday's Eve — Ancient of Israel"  0.33  FLAGGED
+    Legal Advisor        wrong  -> "The legalator"                         0.62  passed
+    Total amount payable wrong  -> "Total amount of"                       0.74  passed
+    500 g jar            wrong  -> "500 pounds"                            0.42  passed
+
+The signal is inverted and structurally so: a wrong translation usually sits
+*near* the source in meaning, while a correct rendering of an idiom can round
+trip through a second 57M model into nonsense. String similarity there measures
+how good the reverse model is, not whether the forward translation was right.
+
+So the reading is produced and shown — a human judges "this says X" far better
+than a ratio does — and it decides nothing. It is off by default (`read_back`),
+because a second model load and a second pass over every distinct string is real
+time for information the operator, who reads Malayalam, mostly does not need.
+Verified: with it on, the employee sheet gains 10 readings and its flag count
+does not move.
+
+**Not done.** The trade overlay and the new name and place assets contain 337
+Malayalam terms written during development by someone who does not read the
+language. They print on client work. `scripts/review_sheet.py` produces them as
+one spreadsheet with the English beside each, and that pass is the outstanding
+debt of this change.
+
 ## ADR-010 · Docs before code
 
 **Date:** 2026-08-22

@@ -528,7 +528,11 @@ def test_a_remembered_row_is_not_flagged_as_an_unverifiable_short_cell() -> None
 
 def test_an_empty_memory_changes_nothing(monkeypatch) -> None:
     """The default path must be byte-identical to before the feature existed."""
-    monkeypatch.setattr(translate, "_run_engine", lambda e, texts, *a, **k: list(texts))
+    monkeypatch.setattr(
+        translate,
+        "_run_engine",
+        lambda e, texts, *a, **k: [translate.Attempt(t) for t in texts],
+    )
     without = translate.translate_rows(["Some product"], [])
     with_empty = translate.translate_rows(["Some product"], [], memory={})
     assert without[0].translation == with_empty[0].translation
@@ -537,7 +541,12 @@ def test_an_empty_memory_changes_nothing(monkeypatch) -> None:
 
 def test_a_blank_remembered_value_is_ignored(monkeypatch) -> None:
     """An empty target must not blank a cell — it falls through to the model."""
-    monkeypatch.setattr(translate, "_run_engine", lambda e, texts, *a, **k: ["ഉൽപ്പന്നം"])
+    monkeypatch.setattr(
+        translate,
+        "_run_engine",
+        # Framed, because a one-word cell is sent inside a carrier sentence.
+        lambda e, texts, *a, **k: [translate.Attempt("ലേബൽ: ഉൽപ്പന്നം.")],
+    )
     rows = translate.translate_rows(["Product"], [], memory={"product": ""})
     assert not rows[0].from_memory
     assert rows[0].translation == "ഉൽപ്പന്നം"
@@ -550,7 +559,7 @@ def test_only_the_remembered_rows_skip_the_model(monkeypatch) -> None:
 
     def fake(engine, texts, *a, **k):
         seen.append(list(texts))
-        return ["ഉൽപ്പന്നം"] * len(texts)
+        return [translate.Attempt("ലേബൽ: ഉൽപ്പന്നം.")] * len(texts)
 
     monkeypatch.setattr(translate, "_run_engine", fake)
     rows = translate.translate_rows(
@@ -558,6 +567,10 @@ def test_only_the_remembered_rows_skip_the_model(monkeypatch) -> None:
         [],
         memory=_memory(("Known", "അറിയാം"), ("Known too", "ഇതും")),
     )
-    assert seen == [["Unknown"]]
+    # One batch, one row in it, and that row is the unremembered one. Checked by
+    # containment rather than equality because a short cell now goes to the
+    # model lowercased and inside a carrier sentence (ADR-035).
+    assert len(seen) == 1 and len(seen[0]) == 1
+    assert "unknown" in seen[0][0].casefold()
     assert [r.translation for r in rows] == ["അറിയാം", "ഉൽപ്പന്നം", "ഇതും"]
     assert [r.from_memory for r in rows] == [True, False, True]

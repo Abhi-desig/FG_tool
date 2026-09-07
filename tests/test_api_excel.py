@@ -812,48 +812,58 @@ def members_sheet() -> dict[str, tuple[str, bytes, str]]:
     }
 
 
-def test_inspect_describes_every_column_and_suggests_the_name_ones() -> None:
+def test_inspect_gives_every_column_a_class_and_a_reason() -> None:
     body = client.post("/api/excel/inspect", files=members_sheet()).json()
     by_key = {c["key"]: c for c in body["columns"]}
 
     assert set(by_key) == {"Members!A", "Members!B", "Members!C"}
-    assert by_key["Members!A"]["looks_like_names"] is True
-    assert by_key["Members!B"]["looks_like_names"] is True
-    # A product column must never be pre-ticked: spelling a real word by sound
-    # is exactly as wrong as translating a name.
-    assert by_key["Members!C"]["looks_like_names"] is False
-    # The samples are what the operator recognises the column by.
+    assert by_key["Members!A"]["cls"] == "PERSON_NAME"
+    assert by_key["Members!B"]["cls"] == "ADDRESS"
+    # A product column must never be classified as names: spelling a real word
+    # by sound is exactly as wrong as translating a name (ADR-035).
+    assert by_key["Members!C"]["cls"] != "PERSON_NAME"
+    # Every class comes with words the operator can act on, because it is a
+    # suggestion they confirm rather than a decision taken for them.
+    assert all(c["why"] for c in body["columns"])
     assert "Anil Kumar" in by_key["Members!A"]["sample"]
 
 
-def test_a_ticked_column_is_written_by_sound_not_translated() -> None:
+def test_a_person_name_column_is_written_by_sound_not_translated() -> None:
     started = client.post(
         "/api/excel/translate",
         files=members_sheet(),
-        data={"name_columns": "Members!A,Members!B"},
+        data={"column_classes": "Members!A=PERSON_NAME,Members!B=ADDRESS"},
     ).json()
     done = wait_for(started["id"])
     assert done["status"] == "done", done
 
     rows = {r["key"]: r for r in done["result"]["rows"]}
-    assert rows["Members!A2"]["translation"] == "അനിൽ കുമർ"
+    assert rows["Members!A2"]["translation"] == "അനിൽ കുമാർ"
+    assert rows["Members!A2"]["cls"] == "PERSON_NAME"
     assert rows["Members!A2"]["from_name"] is True
     assert rows["Members!B2"]["translation"] == "എലവുങ്കൽ വീട്"
 
-    # Exact by construction, so nothing may be flagged and nothing may be
-    # bought from the paid check.
-    assert rows["Members!A2"]["needs_attention"] is False
+    # Never bought from the paid check — a lexicon lookup has nothing to verify.
     assert rows["Members!A2"]["checked"] is False
+    # And never flagged, because every token came from the name lexicon. A name
+    # the lexicon does *not* hold is a different case: it is still written by
+    # sound, but the row carries a note asking the operator to read the spelling
+    # once, because English does not mark vowel length (ADR-035).
+    assert rows["Members!A2"]["needs_attention"] is False
+
+    unknown = {r["key"]: r for r in done["result"]["rows"]}["Members!A3"]
+    assert unknown["source"] == "Radha Menon"
+    assert unknown["from_name"] is True
 
 
-def test_a_heading_is_translated_even_inside_a_ticked_column() -> None:
+def test_a_heading_is_translated_even_inside_a_classified_column() -> None:
     """`Name` and `House name` are ordinary words. Spelled by sound they came
     back as നമെ and ഹൗസ് നമെ, sitting at the top of the column a client reads
     first."""
     started = client.post(
         "/api/excel/translate",
         files=members_sheet(),
-        data={"name_columns": "Members!A,Members!B"},
+        data={"column_classes": "Members!A=PERSON_NAME,Members!B=ADDRESS"},
     ).json()
     rows = {r["key"]: r for r in wait_for(started["id"])["result"]["rows"]}
 
@@ -862,25 +872,29 @@ def test_a_heading_is_translated_even_inside_a_ticked_column() -> None:
     assert rows["Members!A1"]["translation"] == "പേര്"
 
 
-def test_an_unticked_column_is_untouched_by_the_name_rule() -> None:
+def test_a_column_the_operator_reclassifies_takes_the_new_route() -> None:
+    """The override is the whole reason the class is a suggestion."""
     started = client.post(
         "/api/excel/translate",
         files=members_sheet(),
-        data={"name_columns": "Members!A"},
+        data={"column_classes": "Members!A=PERSON_NAME,Members!B=FREE_TEXT"},
     ).json()
     rows = {r["key"]: r for r in wait_for(started["id"])["result"]["rows"]}
 
-    assert rows["Members!C2"]["from_name"] is False
-    assert rows["Members!C2"]["translation"] == "സ്റ്റാൻഡി"
+    assert rows["Members!A2"]["cls"] == "PERSON_NAME"
+    # Forced to FREE_TEXT, so it went to the model rather than being spelled out.
+    assert rows["Members!B2"]["cls"] == "FREE_TEXT"
     assert rows["Members!B2"]["from_name"] is False
+    assert rows["Members!C2"]["translation"] == "സ്റ്റാൻഡി"
 
 
-def test_ticking_nothing_changes_nothing() -> None:
-    """The default must be the behaviour that existed before this feature."""
+def test_sending_no_classes_uses_the_suggestions() -> None:
+    """Absent overrides means the classifier's own answer, not FREE_TEXT for
+    everything — a sheet of names must be safe by default."""
     started = client.post("/api/excel/translate", files=members_sheet()).json()
     result = wait_for(started["id"])["result"]
-    assert result["from_name"] == 0
-    assert all(r["from_name"] is False for r in result["rows"])
+    assert result["by_class"]["PERSON_NAME"] > 0
+    assert result["by_class"]["ADDRESS"] > 0
 
 
 def test_the_operators_correction_beats_the_transliteration() -> None:
@@ -893,7 +907,7 @@ def test_the_operators_correction_beats_the_transliteration() -> None:
         started = client.post(
             "/api/excel/translate",
             files=members_sheet(),
-            data={"name_columns": "Members!A"},
+            data={"column_classes": "Members!A=PERSON_NAME"},
         ).json()
         rows = {r["key"]: r for r in wait_for(started["id"])["result"]["rows"]}
         assert rows["Members!A2"]["translation"] == "അനിൽ കുമാർ"

@@ -25,7 +25,20 @@ called from a router and tested on its own.
 
 from __future__ import annotations
 
+import logging
 import re
+from pathlib import Path
+
+from backend import config
+
+log = logging.getLogger(__name__)
+
+# Corrections the rules cannot derive, and the assets an address is decomposed
+# against. All plain text, shipped with the app, and grown by the review grid
+# when the operator fixes a cell (ADR-035).
+EXCEPTIONS_PATH = config.DATA_DIR / "names" / "exceptions.tsv"
+GAZETTEER_PATH = config.DATA_DIR / "places" / "gazetteer.tsv"
+STRUCTURAL_PATH = config.DATA_DIR / "places" / "structural.tsv"
 
 # --- the alphabet ---------------------------------------------------------
 #
@@ -192,4 +205,202 @@ def line(text: str) -> str:
     return _LATIN_WORD.sub(lambda m: word(m.group(0)), text)
 
 
-__all__ = ["CHILLU", "CONSONANTS", "SIGNS", "VOWELS", "line", "word"]
+# --- the bundled assets ---------------------------------------------------
+
+
+def _load_tsv(path: Path, columns: int = 2) -> dict[str, str]:
+    """A `key <TAB> value` file, keyed casefolded. Missing is empty, not fatal.
+
+    A missing asset degrades the routing — names fall back to pure rules — and
+    says so in the log. It must not stop the shop translating a sheet.
+    """
+    out: dict[str, str] = {}
+    if not path.is_file():
+        log.warning("No transliteration asset at %s", path)
+        return out
+    for line_text in path.read_text(encoding="utf-8").splitlines():
+        if not line_text.strip() or line_text.lstrip().startswith("#"):
+            continue
+        parts = line_text.rstrip("\n").split("\t")
+        if len(parts) < columns:
+            continue
+        key, value = parts[0].strip().casefold(), parts[1].strip()
+        if key and value:
+            out[key] = value
+    return out
+
+
+_CACHE: dict[str, dict[str, str]] = {}
+
+
+def assets() -> dict[str, dict[str, str]]:
+    """The three lookup tables, loaded once.
+
+    Small files and a hot path — a 33,000-cell member list consults these per
+    token — so they are cached rather than re-read like the poster designs.
+    `reset_cache` exists for the tests and for a write-back that has just added
+    a row.
+    """
+    if not _CACHE:
+        _CACHE["names"] = _load_tsv(EXCEPTIONS_PATH)
+        _CACHE["places"] = _load_tsv(GAZETTEER_PATH, columns=2)
+        _CACHE["structural"] = _load_tsv(STRUCTURAL_PATH)
+    return _CACHE
+
+
+def reset_cache() -> None:
+    _CACHE.clear()
+
+
+def known_names() -> frozenset[str]:
+    """Lexicon keys, for the column classifier's profiling."""
+    return frozenset(assets()["names"])
+
+
+def known_places() -> frozenset[str]:
+    return frozenset(assets()["places"])
+
+
+# --- one cell, by class ---------------------------------------------------
+#
+# `line` below is the rules alone. These two are the routes: they consult the
+# bundled assets first and fall back to the rules only for what is left, and
+# they report what did *not* resolve so the caller can refuse to guess.
+
+
+def person(text: str) -> tuple[str, list[str]]:
+    """A PERSON_NAME cell. Returns the Malayalam and the unresolved tokens.
+
+    Ordering, dots and internal punctuation survive exactly: `K.M. Nair` is
+    `കെ.എം. നായർ`, not a resequenced or re-spaced version of it. Deterministic —
+    the same input always gives the same output, because a member list repeats a
+    family's name across rows and two spellings of it is a defect.
+
+    An unresolved token is still transliterated, but it is *named*, so the caller
+    can mark the cell for review rather than let a rule-derived guess pass as an
+    answer.
+    """
+    lexicon = assets()["names"]
+    unresolved: list[str] = []
+
+    def swap(match: re.Match[str]) -> str:
+        token = match.group(0)
+        key = token.casefold()
+        known = lexicon.get(key)
+        if known:
+            return known
+        # A single letter is an initial, and `INITIALS` renders it exactly — a
+        # member list is full of `K.M.` and marking those unresolved would send
+        # most of the column to review for the one part of it that is certain.
+        if len(key) == 1 and key in INITIALS:
+            return INITIALS[key]
+        unresolved.append(token)
+        return word(token)
+
+    return _LATIN_WORD.sub(swap, text), unresolved
+
+
+def address(text: str) -> tuple[str, list[str]]:
+    """An ADDRESS cell, decomposed rather than translated.
+
+    Token order is gazetteer, then structural glossary, then sound — a place
+    name beats a structural word beats a rule. Numbers, PIN codes and phone
+    numbers are never touched: they are not matched by `_LATIN_WORD` at all, so
+    they come through byte-identical, which the caller asserts.
+
+    Multi-word entries are matched longest-first before single tokens, so
+    `post office` does not become `post` + `office`.
+    """
+    places, structural = assets()["places"], assets()["structural"]
+    result = text
+    matched: list[str] = []
+
+    phrases = sorted(
+        ((k, v) for source in (places, structural) for k, v in source.items() if " " in k),
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+    for phrase, malayalam in phrases:
+        pattern = re.compile(rf"(?<!\w){re.escape(phrase)}(?!\w)", re.IGNORECASE)
+        if pattern.search(result):
+            result = pattern.sub(lambda _m, t=malayalam: t, result)
+            matched.append(phrase)
+
+    unresolved: list[str] = []
+
+    def swap(match: re.Match[str]) -> str:
+        token = match.group(0)
+        key = token.casefold()
+        known = places.get(key) or structural.get(key)
+        if known:
+            return known
+        unresolved.append(token)
+        return word(token)
+
+    return _LATIN_WORD.sub(swap, result), unresolved
+
+
+def remember_name(source: str, malayalam: str) -> bool:
+    """Add a corrected name to the exceptions file. True if it was written.
+
+    The file, not the database. These assets are plain text shipped with the
+    app precisely so the operator can read, copy and back them up with a text
+    editor, and a correction that only existed in `data.db` would break that
+    the first time they moved machines (ADR-035).
+    """
+    return _append(EXCEPTIONS_PATH, "names", source, malayalam)
+
+
+def remember_place(source: str, malayalam: str) -> bool:
+    """Add a corrected address token to the gazetteer."""
+    return _append(GAZETTEER_PATH, "places", source, malayalam, extra="corrected")
+
+
+def _append(path: Path, bucket: str, source: str, malayalam: str, extra: str = "") -> bool:
+    """Append one row, unless it is already there with that value."""
+    key = " ".join(source.split()).casefold()
+    value = malayalam.strip()
+    if not key or not value or "\t" in key or "\t" in value:
+        return False
+    table = assets()[bucket]
+    if table.get(key) == value:
+        return False
+
+    line = f"{key}\t{value}" + (f"\t{extra}" if extra else "")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
+        marker = "\n# --- corrected in the review grid ---\n"
+        if marker not in existing:
+            existing += marker
+        path.write_text(existing + line + "\n", encoding="utf-8")
+    except OSError as exc:
+        log.warning("Could not write %s: %s", path, exc)
+        return False
+
+    # The tables are cached, and the very next sheet must see this.
+    reset_cache()
+    return True
+
+
+__all__ = [
+    "CHILLU",
+    "CONSONANTS",
+    "EXCEPTIONS_PATH",
+    "GAZETTEER_PATH",
+    "SIGNS",
+    "STRUCTURAL_PATH",
+    "VOWELS",
+    "address",
+    "assets",
+    "known_names",
+    "known_places",
+    "line",
+    "person",
+    "remember_name",
+    "remember_place",
+    "reset_cache",
+    "word",
+]

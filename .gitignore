@@ -41,6 +41,10 @@ frontend/dist/
 frontend/.vite/
 npm-debug.log*
 
+# Generated from the data/ assets by scripts/review_sheet.py. The assets are
+# the truth; this is a printout of them for a reader to mark up.
+MALAYALAM_REVIEW.xlsx
+
 # ---- Working files -------------------------------------------------------
 # Client artwork must not accumulate in the repo.
 tmp/

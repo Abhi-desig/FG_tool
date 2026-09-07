@@ -90,6 +90,20 @@ REGISTRY: dict[str, ModelSpec] = {
             "review grid exist to cover that."
         ),
     ),
+    "opus-mt-ml-en": ModelSpec(
+        key="opus-mt-ml-en",
+        label="OPUS-MT Malayalam→English (round-trip check)",
+        licence="Apache-2.0",
+        kind="hf",
+        repo="Helsinki-NLP/opus-mt-ml-en",
+        notes=(
+            "Never used to translate the shop's work — only to read the "
+            "forward model's Malayalam back into English so the two can be "
+            "compared. That is the one check that catches fluent-but-wrong "
+            "output, which no surface heuristic can see. Loaded only after the "
+            "forward model is freed; one model at a time (ADR-035)."
+        ),
+    ),
     "indictrans2-en-indic": ModelSpec(
         key="indictrans2-en-indic",
         label="IndicTrans2 English→Indic (translation)",

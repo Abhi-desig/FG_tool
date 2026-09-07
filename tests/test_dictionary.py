@@ -157,8 +157,13 @@ def test_a_partly_glossed_cell_is_not_hijacked_by_the_dictionary(
     one thing a locked term exists to prevent. It must go to the model instead,
     with that term masked.
     """
+    # The fake has to answer the way the real model does: a short cell is sent
+    # inside a carrier sentence, so the reply must carry one back or the row is
+    # refused as a fragment the model rewrote (ADR-035).
     monkeypatch.setattr(
-        translate, "_run_engine", lambda *args, **kwargs: ["X0X എണ്ണമയമുള്ള"]
+        translate,
+        "_run_engine",
+        lambda *args, **kwargs: [translate.Attempt("ലേബൽ: X0X എണ്ണമയമുള്ള.")],
     )
     rows = translate.translate_rows(
         ["Coconut oil"],

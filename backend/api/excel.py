@@ -8,6 +8,7 @@ then produces a new file.
 
 from __future__ import annotations
 
+import re
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -16,9 +17,20 @@ from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field, model_validator
 
 from backend import config, db, jobs, textkey
-from backend.features import dictionary, excel, glossary, translate, translit, verify
+from backend.features import (
+    columns,
+    dictionary,
+    excel,
+    glossary,
+    translate,
+    translit,
+    verify,
+)
 
 router = APIRouter(prefix="/api", tags=["excel"])
+
+# A run of letters, for telling a label apart from a number in a numbers column.
+_LATIN_WORDS = re.compile(r"[A-Za-z]{2,}")
 
 # A ceiling on the review grid, not on the translator: the model works through
 # *unique* strings in batches, so a long sheet costs time, not memory. Member
@@ -155,49 +167,214 @@ def _client_context(client_id: int | None) -> tuple[list[tuple[str, str]], dict[
     return terms, db.corrections_map(client_id)
 
 
-def _name_map(
-    found: excel.Extraction, picked: list[str]
-) -> dict[str, str]:
-    """Every distinct string in a ticked column, written by sound.
+def _classify(found: excel.Extraction) -> list[columns.Classified]:
+    """Every column with its suggested class, ready for the operator to confirm.
 
-    Keyed by the source text, because `translate_rows` works on distinct strings
-    rather than on cells. A string that appears both in a ticked column and
-    outside one is written by sound everywhere — on a member list that is a name
-    that also happens to be a place, and spelling it out is right in both.
+    The profiling lexicons come from `features/translit.py` and
+    `features/dictionary.py`. The classifier itself imports neither — it is
+    handed frozensets, for the same reason every other feature module is handed
+    plain data.
     """
-    if not picked:
-        return {}
-    wanted = set(picked)
-    in_column = [
-        cell
+    names = translit.known_names()
+    places = translit.known_places()
+    words = frozenset(dictionary.answers())
+
+    out: list[columns.Classified] = []
+    for column in excel.columns(found):
+        values = [
+            cell.source
+            for cell in found.cells
+            if cell.sheet == column.sheet
+            and get_column_letter(cell.column) == column.letter
+        ]
+        # The heading is not one of the values it describes.
+        body = values[1:] if values else []
+        sample = body[: columns.SAMPLE_LIMIT]
+        cls, why, profile = columns.classify(
+            column.header, sample, len(set(body)), names, places, words
+        )
+        out.append(
+            columns.Classified(
+                key=f"{column.sheet}!{column.letter}",
+                sheet=column.sheet,
+                letter=column.letter,
+                header=column.header,
+                count=column.count,
+                sample=column.sample,
+                cls=cls,
+                why=why,
+                profile=profile,
+            )
+        )
+    return out
+
+
+def _parse_overrides(raw: str) -> dict[str, str]:
+    """`Sheet!B=PERSON_NAME,Sheet!C=ADDRESS` from the form field.
+
+    An unknown class name is ignored rather than raising: the operator's sheet
+    is already uploaded, and refusing the whole job over one malformed pair
+    would cost them the upload.
+    """
+    picked: dict[str, str] = {}
+    for pair in raw.split(","):
+        key, _, cls = pair.partition("=")
+        key, cls = key.strip(), cls.strip().upper()
+        if key and cls in columns.CLASSES:
+            picked[key] = cls
+    return picked
+
+
+def _route(
+    found: excel.Extraction,
+    classified: list[columns.Classified],
+    approved: frozenset[str] = frozenset(),
+) -> tuple[dict[str, str], dict[str, translate.Resolved]]:
+    """Turn column classes into a per-string class map and per-string answers.
+
+    Everything but FREE_TEXT is answered here, before the translator is called,
+    because only this layer may import `features/translit.py`. What goes down is
+    the decision.
+
+    A string appearing in two columns of different classes keeps the **stricter**
+    one — the first non-FREE_TEXT class wins. Dedup is by distinct string, so one
+    answer has to serve every cell holding it, and routing a name through the
+    model because it also appears in a sentence column is the failure this whole
+    change exists to stop.
+    """
+    by_column = {c.key: c.cls for c in classified}
+    classes: dict[str, str] = {}
+    resolved: dict[str, translate.Resolved] = {}
+
+    for cell in found.cells:
+        key = f"{cell.sheet}!{get_column_letter(cell.column)}"
+        cls = by_column.get(key, "FREE_TEXT")
+        existing = classes.get(cell.source)
+        if existing and existing != "FREE_TEXT":
+            continue
+        classes[cell.source] = cls
+
+    # The heading of a classified column is a word, not an instance of the thing
+    # the column holds. `Name` must be translated; spelled by sound it read നമെ.
+    headings = {c.header for c in classified if c.header}
+    bodies = {
+        cell.source
         for cell in found.cells
-        if f"{cell.sheet}!{get_column_letter(cell.column)}" in wanted
-    ]
-    if not in_column:
-        return {}
-
-    # The heading is not a name. `Name`, `House name` and `Place` are ordinary
-    # English words that must be *translated* — spelled by sound they came back
-    # as നമെ and പ്ലകെ, which is nonsense sitting at the top of every column the
-    # client reads first. The topmost cell of each ticked column is excluded,
-    # and only if that text never appears anywhere else on the sheet.
-    headers: dict[tuple[str, int], int] = {}
-    for cell in in_column:
-        spot = (cell.sheet, cell.column)
-        headers[spot] = min(headers.get(spot, cell.row), cell.row)
-
-    heading_text = {
-        cell.source
-        for cell in in_column
-        if headers[(cell.sheet, cell.column)] == cell.row
+        if cell.row != min(
+            other.row
+            for other in found.cells
+            if other.sheet == cell.sheet and other.column == cell.column
+        )
     }
-    body_text = {
-        cell.source
-        for cell in in_column
-        if headers[(cell.sheet, cell.column)] != cell.row
-    }
-    sources = body_text | (heading_text & body_text)
-    return {source: translit.line(source) for source in sources}
+    for heading in headings & (headings - bodies):
+        classes[heading] = "FREE_TEXT"
+
+    # A residue token that is an ordinary English word is the signal that this
+    # column is not what it was classified as — `Manager` in a name column means
+    # the class is wrong, not that the lexicon is short. That is the genuinely
+    # uncertain case, and the only one that refuses outright.
+    vocabulary = frozenset(dictionary.answers())
+
+    for source, cls in classes.items():
+        if cls in ("PERSON_NAME", "ADDRESS"):
+            text, unknown = (
+                translit.person(source) if cls == "PERSON_NAME" else translit.address(source)
+            )
+            english = [t for t in unknown if textkey.normalise(t) in vocabulary]
+            if english:
+                resolved[source] = translate.Resolved(
+                    text=text,
+                    unresolved_reason=(
+                        f"“{', '.join(english[:3])}” is an ordinary English word, "
+                        f"so this column may not be "
+                        f"{'names' if cls == 'PERSON_NAME' else 'addresses'} after "
+                        f"all. Left in English — change the column's kind, or type "
+                        f"this one by hand."
+                    ),
+                )
+            elif unknown:
+                resolved[source] = translate.Resolved(
+                    text=text,
+                    reading_note=(
+                        f"“{', '.join(unknown[:3])}” was written by sound. Read the "
+                        f"spelling once — correcting it here remembers it for good."
+                    ),
+                )
+            else:
+                resolved[source] = translate.Resolved(text=text)
+        elif cls == "CATEGORICAL":
+            # A short vocabulary repeated across the column. Approved once into
+            # the client glossary and then correct on every future sheet — which
+            # is worth far more than a machine translation of the same ten
+            # words, thirty times, differently each sheet.
+            #
+            # An approved value is left out of `resolved` entirely so the
+            # glossary path picks it up, exactly as it would any locked term.
+            if textkey.normalise(source) not in approved:
+                resolved[source] = translate.Resolved(
+                    text="",
+                    unresolved_reason=(
+                        "This column repeats a short list of values. Approve them "
+                        "once below and they are fixed on every sheet from now on "
+                        "— they are never machine-translated."
+                    ),
+                )
+        elif cls in ("CODE", "NUMERIC_DATE"):
+            if _LATIN_WORDS.search(source):
+                # A word in a numbers column is a label, not a number. Measured:
+                # `Total` and `Average` sit in the salary column of a real sheet
+                # and passed straight through in English, which is a wrong cell
+                # the column class had made invisible. Left for the ordinary
+                # routes to answer.
+                classes[source] = "FREE_TEXT"
+            else:
+                # Untouched, and asserted untouched on export.
+                resolved[source] = translate.Resolved(text=source)
+
+    return classes, resolved
+
+
+def _approval_lists(
+    found: excel.Extraction,
+    classified: list[columns.Classified],
+    library: dict[str, str],
+    approved: frozenset[str],
+) -> list[dict[str, object]]:
+    """Per categorical column, the distinct values and a suggested Malayalam.
+
+    The suggestion comes from the word library only — never from the model. The
+    whole point of this route is that these ten words are decided once by a
+    person rather than guessed thirty times by a machine, so offering a machine
+    guess as the default would give the column back to the thing it was taken
+    from.
+    """
+    out: list[dict[str, object]] = []
+    for column in classified:
+        if column.cls != "CATEGORICAL":
+            continue
+        letter = column.letter
+        values: list[str] = []
+        for cell in found.cells:
+            if cell.sheet != column.sheet or get_column_letter(cell.column) != letter:
+                continue
+            if cell.source == column.header or cell.source in values:
+                continue
+            values.append(cell.source)
+        out.append(
+            {
+                "key": column.key,
+                "header": column.header,
+                "values": [
+                    {
+                        "source": value,
+                        "suggested": library.get(textkey.normalise(value), ""),
+                        "approved": textkey.normalise(value) in approved,
+                    }
+                    for value in sorted(values, key=str.casefold)
+                ],
+            }
+        )
+    return out
 
 
 def _library() -> tuple[dict[str, str], list[tuple[str, str]]]:
@@ -240,6 +417,9 @@ def inspect(
     unique = excel.unique_sources(found.cells)
     terms, memory = _client_context(client_id)
     library, _phrases = _library()
+    classified = _classify(found)
+    approved = frozenset(textkey.normalise(t[0]) for t in terms)
+    classes, resolved = _route(found, classified, approved)
 
     from_memory = [s for s in unique if textkey.normalise(s) in memory]
     remembered = set(from_memory)
@@ -259,6 +439,9 @@ def inspect(
         and not glossary.mask(s, terms).terms
     ]
     covered |= set(from_dictionary)
+    # Names, addresses, codes and dates never reach the model, so they are not
+    # quotable work either.
+    covered |= {s for s in unique if s in resolved}
     quotable = [s for s in unique if s not in covered]
 
     return {
@@ -273,27 +456,58 @@ def inspect(
         "from_glossary": len(from_glossary),
         "from_dictionary": len(from_dictionary),
         "to_translate": len(quotable),
-        # Every column with text in it, and which ones look like people and
-        # places. A suggestion for the operator to confirm — see
-        # `excel.looks_like_names` for why this is never decided for them.
-        "columns": [
-            {
-                "key": f"{c.sheet}!{c.letter}",
-                "sheet": c.sheet,
-                "letter": c.letter,
-                "header": c.header,
-                "count": c.count,
-                "sample": c.sample,
-                "looks_like_names": excel.looks_like_names(c),
-            }
-            for c in excel.columns(found)
-        ],
+        # Every column with text in it, its suggested class, and why. A
+        # suggestion the operator confirms or overrides before pressing
+        # Translate — guessing wrong is symmetrical, so this never decides for
+        # them (ADR-035).
+        "columns": [c.as_dict() for c in classified],
+        "classes": list(columns.CLASSES),
+        # How much of the sheet each route would take. The operator is deciding
+        # whether the classes look right, and these are the numbers that say so.
+        "routed": {
+            cls: sum(1 for source in unique if classes.get(source) == cls)
+            for cls in columns.CLASSES
+        },
+        "unresolved": sum(
+            1 for answer in resolved.values() if answer.unresolved_reason
+        ),
+        # The values each categorical column repeats, with a suggestion from the
+        # word library where there is one. Approved once, they become locked
+        # glossary terms and this column is never machine-translated again.
+        "categorical": _approval_lists(found, classified, library, approved),
         "engine": translate.available_engine(),
         # What the optional Claude check would cost on *this* sheet. Quoted here
         # rather than on a route of its own so the operator is not asked to
         # upload the same 33,000-row file twice to find out.
         "verify": verify.estimate(verify.checkable(quotable)),
     }
+
+
+class ApprovalIn(BaseModel):
+    """Confirmed values for one categorical column."""
+
+    client_id: int
+    pairs: list[TermIn] = Field(default_factory=list, max_length=MAX_TERMS)
+
+
+@router.post("/excel/categorical/approve")
+def approve_categorical(body: ApprovalIn) -> dict[str, object]:
+    """Lock a categorical column's vocabulary into the client glossary.
+
+    Deliberately the *same* store as any other locked term rather than a new
+    one. An approved category value and a locked brand name are the same kind of
+    thing — the operator's decision about wording — and a second table holding
+    half of them would be a second place to look when one of them is wrong.
+    """
+    if not body.pairs:
+        raise HTTPException(400, "Nothing to approve.")
+    try:
+        rows = db.upsert_terms(
+            body.client_id, [t.model_dump() for t in body.pairs]
+        )
+    except db.NotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return _glossary_envelope(body.client_id, rows)
 
 
 @router.post("/excel/translate")
@@ -303,7 +517,11 @@ def start_translate(
     engine: Annotated[str | None, Form()] = None,
     check_with_claude: Annotated[bool, Form()] = False,
     over_budget_ok: Annotated[bool, Form()] = False,
-    name_columns: Annotated[str, Form()] = "",
+    # `Sheet!B=PERSON_NAME,Sheet!C=ADDRESS`. Absent means take the suggestions.
+    column_classes: Annotated[str, Form()] = "",
+    # Off by default: a second model and a second pass over every distinct
+    # string, for a reading that raises no flag. See the note in translate.py.
+    read_back: Annotated[bool, Form()] = False,
 ) -> dict[str, object]:
     """Translate a sheet and return a job whose result is the review grid.
 
@@ -328,9 +546,27 @@ def start_translate(
 
     terms, memory = _client_context(client_id)
     library, phrases = _library()
-    # A comma-separated list of "Sheet!C", because this endpoint takes form
-    # fields rather than JSON — the file has to come with it.
-    names = _name_map(found, [c for c in name_columns.split(",") if c.strip()])
+    # The operator's confirmed classes, over the suggestions. A form field
+    # rather than JSON because the file has to come with it.
+    classified = _classify(found)
+    overrides = _parse_overrides(column_classes)
+    if overrides:
+        classified = [
+            columns.Classified(
+                key=c.key,
+                sheet=c.sheet,
+                letter=c.letter,
+                header=c.header,
+                count=c.count,
+                sample=c.sample,
+                cls=overrides.get(c.key, c.cls),
+                why="chosen by you" if c.key in overrides else c.why,
+                profile=c.profile,
+            )
+            for c in classified
+        ]
+    approved = frozenset(textkey.normalise(t[0]) for t in terms)
+    classes, resolved = _route(found, classified, approved)
 
     unique = excel.unique_sources(found.cells)
     name = file.filename or "sheet.xlsx"
@@ -348,7 +584,9 @@ def start_translate(
             memory=memory,
             dictionary=library,
             phrases=phrases,
-            names=names,
+            resolved=resolved,
+            classes=classes,
+            read_back=read_back,
         )
         by_source = {r.source: r for r in rows}
 
@@ -431,6 +669,12 @@ def start_translate(
                     "from_memory": row.from_memory,
                     "from_dictionary": row.from_dictionary,
                     "from_name": row.from_name,
+                    "cls": row.cls,
+                    "unresolved": row.unresolved,
+                    "suggestion": row.suggestion,
+                    "score": row.score,
+                    "divergence": row.divergence,
+                    "back_translation": row.back_translation,
                     "lost_terms": row.lost_terms,
                     "warnings": row.warnings,
                     "needs_attention": row.needs_attention,
@@ -451,6 +695,11 @@ def start_translate(
             "from_memory": sum(1 for r in grid if r["from_memory"]),
             "from_dictionary": sum(1 for r in grid if r["from_dictionary"]),
             "from_name": sum(1 for r in grid if r["from_name"]),
+            "unresolved": sum(1 for r in grid if r["unresolved"]),
+            "by_class": {
+                cls: sum(1 for r in grid if r["cls"] == cls)
+                for cls in columns.CLASSES
+            },
             "review": review,
             "verify_corrected": sum(1 for r in grid if r["verify_corrected"]),
             # NEXT.md 1.7: translating with the glossary off is the most likely
@@ -474,6 +723,58 @@ class ExportRequest(BaseModel):
     remember: bool = True
     # Which client this sheet belongs to. None means the shop-wide memory.
     client_id: int | None = None
+
+
+def _learn_by_class(
+    job_rows: list[dict[str, object]], final: dict[str, str], client_id: int | None
+) -> dict[str, int]:
+    """Send each correction to the store its class belongs in (ADR-035).
+
+    A corrected name goes to the name lexicon, a corrected address token to the
+    gazetteer, a corrected category value to the client glossary. Only ordinary
+    wording goes to the flat corrections memory.
+
+    **Why not put everything in the corrections memory.** That memory matches a
+    *whole cell*. Correcting `Kadavil House` there fixes that cell and teaches
+    nothing about `Kadavil Veedu` in the next row — whereas one row in the
+    gazetteer fixes every address that place ever appears in. The class is
+    already known, so routing the correction costs nothing and compounds.
+    """
+    counts = {"names": 0, "places": 0, "glossary": 0}
+    glossary_pairs: list[dict[str, str]] = []
+
+    for row in job_rows:
+        key = str(row.get("key", ""))
+        if key not in final:
+            continue
+        text = (final[key] or "").strip()
+        source = str(row.get("source") or "")
+        offline = str(row.get("offline_translation") or "").strip()
+        if not text or not source or text == offline:
+            continue
+
+        cls = str(row.get("cls") or "FREE_TEXT")
+        if cls == "PERSON_NAME":
+            # One token corrected at a time only. A two-word name corrected as a
+            # whole says nothing about which half was wrong, and writing the
+            # pair under the first token would teach the lexicon a falsehood.
+            if len(source.split()) == 1 and translit.remember_name(source, text):
+                counts["names"] += 1
+        elif cls == "ADDRESS":
+            if len(source.split()) == 1 and translit.remember_place(source, text):
+                counts["places"] += 1
+        elif cls == "CATEGORICAL" and client_id is not None:
+            glossary_pairs.append({"source_term": source, "target_term": text})
+
+    if glossary_pairs:
+        try:
+            db.upsert_terms(client_id, glossary_pairs)  # type: ignore[arg-type]
+            counts["glossary"] = len(glossary_pairs)
+        except db.NotFound:
+            # The client was archived between translate and export. The flat
+            # memory still catches it below; losing the export would be worse.
+            counts["glossary"] = 0
+    return counts
 
 
 def _learn(job_rows: list[dict[str, object]], final: dict[str, str]) -> list[tuple[str, str]]:
@@ -528,6 +829,24 @@ def export(body: ExportRequest) -> FileResponse:
     if not source.is_relative_to(config.WORK_DIR.resolve()) or not source.exists():
         raise HTTPException(404, "The uploaded sheet is no longer available.")
 
+    # The invariant, checked rather than trusted: a CODE or NUMERIC cell is
+    # passed through untouched, so if one differs here something upstream has
+    # rewritten an account number or a phone number. Refuse the export — a
+    # wrong digit in a client's spreadsheet is not recoverable by review.
+    altered = [
+        row["key"]
+        for row in (job.result.get("rows") or [])
+        if row.get("cls") in ("CODE", "NUMERIC_DATE")
+        and body.translations.get(str(row["key"]), row["source"]) != row["source"]
+    ]
+    if altered:
+        raise HTTPException(
+            409,
+            f"{len(altered)} number or code cell(s) would be changed "
+            f"({', '.join(altered[:4])}). Those must pass through untouched — "
+            f"nothing has been written.",
+        )
+
     try:
         written = excel.apply(source.read_bytes(), body.translations)
     except excel.ExcelError as exc:
@@ -537,9 +856,22 @@ def export(body: ExportRequest) -> FileResponse:
     out.write_bytes(written)
 
     remembered = 0
+    routed = {"names": 0, "places": 0, "glossary": 0}
     if body.remember:
         rows = job.result.get("rows") or []
-        pairs = _learn(rows, body.translations)
+        # By class first, so a corrected place lands where it compounds. What is
+        # left over is ordinary wording, and that goes to the flat memory.
+        routed = _learn_by_class(rows, body.translations, body.client_id)
+        pairs = [
+            pair
+            for pair in _learn(rows, body.translations)
+            if not any(
+                str(r.get("source")) == pair[0]
+                and str(r.get("cls") or "FREE_TEXT")
+                in ("PERSON_NAME", "ADDRESS", "CATEGORICAL")
+                for r in rows
+            )
+        ]
         if pairs:
             try:
                 counts = db.upsert_corrections(
@@ -557,7 +889,15 @@ def export(body: ExportRequest) -> FileResponse:
         filename="translated.xlsx",
         # Read by `exportSheet`, which already uses raw fetch. A second round
         # trip to report this could fail and leave the learning unexplained.
-        headers={"X-Corrections-Remembered": str(remembered)},
+        headers={
+            "X-Corrections-Remembered": str(remembered),
+            # Where the class-aware half went. Separate headers because these
+            # land in different stores and the operator's undo differs: the
+            # flat memory is undone by job id, a lexicon row by editing the file.
+            "X-Names-Learned": str(routed["names"]),
+            "X-Places-Learned": str(routed["places"]),
+            "X-Terms-Locked": str(routed["glossary"]),
+        },
     )
 
 
