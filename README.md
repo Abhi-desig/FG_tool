@@ -240,7 +240,10 @@ Do not promise these to a client:
 - Translation is not perfect. The glossary makes your **repeated** terms reliable; new sentences
   still need a human eye. That is why the review grid is mandatory.
 - Upscaling invents detail from low resolution. It **cannot** undo a shaken camera.
-- AI cannot reliably write Malayalam into an image — which is precisely why this app draws all text
-  itself.
+- **AI cannot reliably spell Malayalam on a poster.** The app used to draw every word itself so
+  it came out right; since ADR-034 the AI draws the whole poster, so **read every word before you
+  print it**. The screen shows your copy beside the poster for exactly this.
+- A generated poster is a picture, not a document. A wrong word means making it again — CorelDRAW
+  cannot edit it.
 - Google embeds an invisible **SynthID watermark** in AI images. It does not affect printing, but be
   ready if a client asks.

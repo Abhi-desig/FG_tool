@@ -12,10 +12,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field, model_validator
 
 from backend import config, db, jobs, textkey
-from backend.features import excel, glossary, translate, verify
+from backend.features import dictionary, excel, glossary, translate, translit, verify
 
 router = APIRouter(prefix="/api", tags=["excel"])
 
@@ -154,6 +155,70 @@ def _client_context(client_id: int | None) -> tuple[list[tuple[str, str]], dict[
     return terms, db.corrections_map(client_id)
 
 
+def _name_map(
+    found: excel.Extraction, picked: list[str]
+) -> dict[str, str]:
+    """Every distinct string in a ticked column, written by sound.
+
+    Keyed by the source text, because `translate_rows` works on distinct strings
+    rather than on cells. A string that appears both in a ticked column and
+    outside one is written by sound everywhere — on a member list that is a name
+    that also happens to be a place, and spelling it out is right in both.
+    """
+    if not picked:
+        return {}
+    wanted = set(picked)
+    in_column = [
+        cell
+        for cell in found.cells
+        if f"{cell.sheet}!{get_column_letter(cell.column)}" in wanted
+    ]
+    if not in_column:
+        return {}
+
+    # The heading is not a name. `Name`, `House name` and `Place` are ordinary
+    # English words that must be *translated* — spelled by sound they came back
+    # as നമെ and പ്ലകെ, which is nonsense sitting at the top of every column the
+    # client reads first. The topmost cell of each ticked column is excluded,
+    # and only if that text never appears anywhere else on the sheet.
+    headers: dict[tuple[str, int], int] = {}
+    for cell in in_column:
+        spot = (cell.sheet, cell.column)
+        headers[spot] = min(headers.get(spot, cell.row), cell.row)
+
+    heading_text = {
+        cell.source
+        for cell in in_column
+        if headers[(cell.sheet, cell.column)] == cell.row
+    }
+    body_text = {
+        cell.source
+        for cell in in_column
+        if headers[(cell.sheet, cell.column)] != cell.row
+    }
+    sources = body_text | (heading_text & body_text)
+    return {source: translit.line(source) for source in sources}
+
+
+def _library() -> tuple[dict[str, str], list[tuple[str, str]]]:
+    """The word library as the translator wants it: whole-cell map, plus phrases.
+
+    Assembled here for the same reason `_client_context` is: `features/
+    translate.py` may not import `db`, and it may not import another feature
+    module either, so the router is the one place allowed to hold both halves.
+    The operator's overrides go on last, so they win over both Olam and the
+    trade overlay (ADR-032).
+    """
+    overrides = db.dictionary_overrides()
+    entries = dictionary.answers()
+    entries.update(overrides)
+    phrases = [
+        (source, overrides.get(textkey.normalise(source), target))
+        for source, target in dictionary.phrase_terms()
+    ]
+    return entries, phrases
+
+
 @router.post("/excel/inspect")
 def inspect(
     file: Annotated[UploadFile, File()],
@@ -174,6 +239,7 @@ def inspect(
 
     unique = excel.unique_sources(found.cells)
     terms, memory = _client_context(client_id)
+    library, _phrases = _library()
 
     from_memory = [s for s in unique if textkey.normalise(s) in memory]
     remembered = set(from_memory)
@@ -181,6 +247,18 @@ def inspect(
         s for s in unique if s not in remembered and glossary.is_fully_covered(s, terms)
     ]
     covered = remembered | set(from_glossary)
+    # Must mirror the precedence in `translate.translate_rows` exactly, or the
+    # quote promises a saving the translation does not make. A cell the glossary
+    # touched without covering still goes to the model, so it is not free here
+    # either.
+    from_dictionary = [
+        s
+        for s in unique
+        if s not in covered
+        and textkey.normalise(s) in library
+        and not glossary.mask(s, terms).terms
+    ]
+    covered |= set(from_dictionary)
     quotable = [s for s in unique if s not in covered]
 
     return {
@@ -193,7 +271,23 @@ def inspect(
         # Already approved, so free and offline however the operator proceeds.
         "from_memory": len(from_memory),
         "from_glossary": len(from_glossary),
+        "from_dictionary": len(from_dictionary),
         "to_translate": len(quotable),
+        # Every column with text in it, and which ones look like people and
+        # places. A suggestion for the operator to confirm — see
+        # `excel.looks_like_names` for why this is never decided for them.
+        "columns": [
+            {
+                "key": f"{c.sheet}!{c.letter}",
+                "sheet": c.sheet,
+                "letter": c.letter,
+                "header": c.header,
+                "count": c.count,
+                "sample": c.sample,
+                "looks_like_names": excel.looks_like_names(c),
+            }
+            for c in excel.columns(found)
+        ],
         "engine": translate.available_engine(),
         # What the optional Claude check would cost on *this* sheet. Quoted here
         # rather than on a route of its own so the operator is not asked to
@@ -209,6 +303,7 @@ def start_translate(
     engine: Annotated[str | None, Form()] = None,
     check_with_claude: Annotated[bool, Form()] = False,
     over_budget_ok: Annotated[bool, Form()] = False,
+    name_columns: Annotated[str, Form()] = "",
 ) -> dict[str, object]:
     """Translate a sheet and return a job whose result is the review grid.
 
@@ -232,6 +327,10 @@ def start_translate(
         )
 
     terms, memory = _client_context(client_id)
+    library, phrases = _library()
+    # A comma-separated list of "Sheet!C", because this endpoint takes form
+    # fields rather than JSON — the file has to come with it.
+    names = _name_map(found, [c for c in name_columns.split(",") if c.strip()])
 
     unique = excel.unique_sources(found.cells)
     name = file.filename or "sheet.xlsx"
@@ -247,6 +346,9 @@ def start_translate(
             report,
             progress_to=0.5 if check_with_claude else 0.95,
             memory=memory,
+            dictionary=library,
+            phrases=phrases,
+            names=names,
         )
         by_source = {r.source: r for r in rows}
 
@@ -256,7 +358,7 @@ def start_translate(
         # is the client's own approved wording and a remembered cell is the
         # operator's own correction; paying a model to overwrite either is both
         # a waste and a way to lose an answer that was already right.
-        to_check = [r for r in rows if not (r.glossary_only or r.from_memory)]
+        to_check = [r for r in rows if not r.exact]
         if check_with_claude and to_check:
             outcome = verify.check_rows(
                 [(r.source, r.translation) for r in to_check],
@@ -327,6 +429,8 @@ def start_translate(
                     "glossary_terms": row.glossary_terms,
                     "glossary_only": row.glossary_only,
                     "from_memory": row.from_memory,
+                    "from_dictionary": row.from_dictionary,
+                    "from_name": row.from_name,
                     "lost_terms": row.lost_terms,
                     "warnings": row.warnings,
                     "needs_attention": row.needs_attention,
@@ -345,6 +449,8 @@ def start_translate(
             "must_fix": sum(1 for r in grid if r["must_fix"]),
             "from_glossary": sum(1 for r in grid if r["glossary_only"]),
             "from_memory": sum(1 for r in grid if r["from_memory"]),
+            "from_dictionary": sum(1 for r in grid if r["from_dictionary"]),
+            "from_name": sum(1 for r in grid if r["from_name"]),
             "review": review,
             "verify_corrected": sum(1 for r in grid if r["verify_corrected"]),
             # NEXT.md 1.7: translating with the glossary off is the most likely
@@ -605,6 +711,146 @@ def forget_job(body: ForgetJobIn) -> dict[str, object]:
     """Undo everything one export taught."""
     forgotten = db.forget_job(body.job_id)
     return {"forgotten": forgotten, "total": db.count_corrections(None)}
+
+
+# --- word library ----------------------------------------------------------
+#
+# The bundled English → Malayalam dictionary, plus whatever the operator has
+# corrected in it. Read-mostly: the data itself ships in `data/dictionary/` and
+# only the diff lives in the database (ADR-032).
+
+
+# A search page. Large enough to scan, small enough that 59,000 rows never
+# cross the wire at once.
+DICTIONARY_PAGE = 50
+
+
+class DictionaryOverrideIn(BaseModel):
+    source_term: str = Field(min_length=1, max_length=300)
+    target_term: str = Field(min_length=1, max_length=300)
+
+
+def _dictionary_rows(
+    entries: list[dictionary.Entry], overrides: dict[str, str]
+) -> list[dict[str, object]]:
+    """Entries with the operator's own corrections shown in place."""
+    rows: list[dict[str, object]] = []
+    for entry in entries:
+        key = textkey.normalise(entry.source)
+        override = overrides.get(key)
+        rows.append(
+            {
+                "source": entry.source,
+                "target": override or entry.primary,
+                "alternatives": entry.alternatives,
+                # What the operator is looking at when they decide whether to
+                # trust a row. "Yours" outranks the other two by construction.
+                "origin": "yours" if override else ("trade" if entry.trade else "olam"),
+                # Kept so the panel can show what it replaced, rather than
+                # making the operator remember what the book used to say.
+                "bundled": entry.primary if override else "",
+            }
+        )
+    return rows
+
+
+@router.get("/dictionary")
+def search_dictionary(q: str = "", offset: int = 0) -> dict[str, object]:
+    """Search the word library. `q` empty lists it from the beginning."""
+    entries, total = dictionary.search(q, limit=DICTIONARY_PAGE, offset=max(0, offset))
+    return {
+        "rows": _dictionary_rows(entries, db.dictionary_overrides()),
+        "total": total,
+        "offset": max(0, offset),
+        "page": DICTIONARY_PAGE,
+        "bundled": dictionary.count(),
+        "overrides": len(db.dictionary_overrides()),
+    }
+
+
+@router.get("/dictionary/export")
+def export_dictionary() -> FileResponse:
+    """The whole library as one spreadsheet, for editing in the shop's own tool."""
+    overrides = db.dictionary_overrides()
+    entries = sorted(dictionary.load().values(), key=lambda e: e.source.casefold())
+    rows = [
+        (
+            str(row["source"]),
+            str(row["target"]),
+            " | ".join(row["alternatives"]),  # type: ignore[arg-type]
+            {"yours": "Yours", "trade": "Print trade", "olam": "Olam"}[str(row["origin"])],
+        )
+        for row in _dictionary_rows(entries, overrides)
+    ]
+    out = config.WORK_DIR / "word-library.xlsx"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(excel.write_dictionary(rows))
+    return FileResponse(
+        out,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="word-library.xlsx",
+    )
+
+
+@router.post("/dictionary/import")
+def import_dictionary(file: Annotated[UploadFile, File()]) -> dict[str, object]:
+    """Load an edited library back, keeping only the rows that changed.
+
+    Only the differences are stored. Re-importing the exported sheet unchanged
+    must write nothing at all — otherwise one round trip would copy 59,000
+    bundled rows into the database and freeze the library at today's version.
+    """
+    try:
+        sheet = excel.read_pairs(_read(file), limit=MAX_CORRECTIONS)
+    except excel.ExcelError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if sheet.looks_swapped:
+        raise HTTPException(
+            400,
+            "This sheet looks the wrong way round: the Malayalam is in the first "
+            "column. Put the English in the first column and the Malayalam in "
+            "the second, then load it again.",
+        )
+    if not sheet.pairs:
+        raise HTTPException(
+            400,
+            "No English and Malayalam pairs in that file. The first column is "
+            "the English and the second is the Malayalam.",
+        )
+
+    bundled = dictionary.load()
+    changed = [
+        (source, target)
+        for source, target in sheet.pairs
+        if (entry := bundled.get(textkey.normalise(source))) is None
+        or entry.primary != target
+    ]
+    counts = db.upsert_dictionary_overrides(changed)
+    return {
+        "rows": len(sheet.pairs),
+        "unchanged": len(sheet.pairs) - len(changed),
+        "truncated": sheet.truncated,
+        "blank_rows": sheet.skipped,
+        "overrides": len(db.dictionary_overrides()),
+        **counts,
+    }
+
+
+@router.put("/dictionary/override")
+def put_dictionary_override(body: DictionaryOverrideIn) -> dict[str, object]:
+    """Correct one word without a spreadsheet round trip."""
+    counts = db.upsert_dictionary_overrides([(body.source_term, body.target_term)])
+    if not counts["added"] and not counts["updated"]:
+        raise HTTPException(400, "That is not a word and a translation.")
+    return {"overrides": db.list_dictionary_overrides(), **counts}
+
+
+@router.delete("/dictionary/override/{override_id}")
+def delete_dictionary_override(override_id: int) -> dict[str, object]:
+    """Drop one correction, putting the bundled answer back in force."""
+    db.delete_dictionary_override(override_id)
+    return {"overrides": db.list_dictionary_overrides()}
 
 
 @router.get("/settings/translation")

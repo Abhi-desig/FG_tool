@@ -133,8 +133,8 @@ def test_deleting_a_key_leaves_nothing_behind() -> None:
 
 
 def test_batch_artwork_is_half_price() -> None:
-    instant = ai.cost_of(ai.ARTWORK_MODEL, batch=False)
-    batch = ai.cost_of(ai.ARTWORK_MODEL, batch=True)
+    instant = ai.cost_of(ai.POSTER_MODEL, batch=False)
+    batch = ai.cost_of(ai.POSTER_MODEL, batch=True)
     assert batch < instant
     assert batch == pytest.approx(instant / 2, rel=0.05)
 
@@ -146,7 +146,7 @@ def test_costs_are_whole_paise() -> None:
 
 
 def test_estimate_is_free_and_states_the_price() -> None:
-    quote = ai.estimate("poster-artwork", batch=True)
+    quote = ai.estimate("poster", batch=True)
     assert quote["cost_paise"] == 600
     assert quote["cost_rupees"] == 6.0
     assert quote["batch"] is True
@@ -154,7 +154,7 @@ def test_estimate_is_free_and_states_the_price() -> None:
 
 def test_photo_edit_defaults_cheaper_than_artwork() -> None:
     assert ai.estimate("photo-edit", False)["cost_paise"] < ai.estimate(
-        "poster-artwork", False
+        "poster", False
     )["cost_paise"]
 
 
@@ -166,12 +166,12 @@ def test_only_successful_calls_count_as_spend(monkeypatch: pytest.MonkeyPatch) -
     before = ai.budget_status()["total_paise"]
 
     fake(monkeypatch, response=FakeResponse([FakePart(data=b"PNGDATA")]))
-    ai.generate_artwork({"subject": "a temple at dusk"}, batch=True)
+    ai.generate_poster("example-festival", {"main": "Onam Sale"}, batch=True)
     after_success = ai.budget_status()
     assert after_success["total_paise"] == before + 600
 
     fake(monkeypatch, raises=RuntimeError("safety: blocked"))
-    ai.generate_artwork({"subject": "something refused"}, batch=True)
+    ai.generate_poster("example-festival", {"main": "Onam Sale"}, batch=True)
     after_failure = ai.budget_status()
     assert after_failure["total_paise"] == after_success["total_paise"]
     assert after_failure["failed_runs"] >= 1
@@ -185,7 +185,7 @@ def test_budget_reports_against_two_thousand_rupees() -> None:
 
 
 def test_budget_fraction_never_exceeds_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    db.record_spend("poster-artwork", ai.ARTWORK_MODEL, 500_000, True, "ok")
+    db.record_spend("poster", ai.POSTER_MODEL, 500_000, True, "ok")
     status = ai.budget_status()
     assert status["fraction_used"] == 1.0
     assert status["over_budget"] is True
@@ -196,7 +196,7 @@ def test_budget_fraction_never_exceeds_one(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_missing_key_is_explained_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
     db.delete_api_key("GEMINI_API_KEY")
-    result = ai.generate_artwork({"subject": "anything"})
+    result = ai.generate_poster("example-festival", {"main": "Onam Sale"})
     assert result.ok is False
     assert "Settings" in (result.error or "")
 
@@ -204,7 +204,7 @@ def test_missing_key_is_explained_not_raised(monkeypatch: pytest.MonkeyPatch) ->
 def test_no_charge_recorded_when_the_key_is_missing() -> None:
     db.delete_api_key("GEMINI_API_KEY")
     before = ai.budget_status()["runs"] + ai.budget_status()["failed_runs"]
-    ai.generate_artwork({"subject": "anything"})
+    ai.generate_poster("example-festival", {"main": "Onam Sale"})
     after = ai.budget_status()["runs"] + ai.budget_status()["failed_runs"]
     assert after == before, "a call that never left the machine is not a run"
 
@@ -223,17 +223,17 @@ def test_sdk_errors_become_plain_english(
     monkeypatch: pytest.MonkeyPatch, raised: Exception, expected: str
 ) -> None:
     fake(monkeypatch, raises=raised)
-    result = ai.generate_artwork({"subject": "a temple"})
+    result = ai.generate_poster("example-festival", {"main": "Onam Sale"})
     assert result.ok is False
     assert expected in (result.error or "").lower()
 
 
 def test_empty_response_is_not_charged(monkeypatch: pytest.MonkeyPatch) -> None:
     fake(monkeypatch, response=FakeResponse([FakePart(text="sorry")]))
-    result = ai.generate_artwork({"subject": "a temple"})
+    result = ai.generate_poster("example-festival", {"main": "Onam Sale"})
     assert result.ok is False
     assert result.cost_paise == 0
-    assert "no image" in (result.error or "").lower()
+    assert "no poster" in (result.error or "").lower()
 
 
 def test_missing_instruction_never_reaches_the_api(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -243,62 +243,13 @@ def test_missing_instruction_never_reaches_the_api(monkeypatch: pytest.MonkeyPat
     assert client.models.calls == [], "no request should have been sent"
 
 
-# --- the poster guarantee -------------------------------------------------
-
-
-def test_layout_plan_returns_data_not_pixels(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The constraint the whole poster feature rests on."""
-    plan = {"blocks": [{"id": "headline", "text": "കേരളം സെയിൽ", "x": 0.1, "y": 0.1}]}
-    fake(monkeypatch, response=FakeResponse([], text=json.dumps(plan)))
-    result = ai.plan_layout({"headline": "കേരളം സെയിൽ"})
-    assert result.ok is True
-    assert result.image is None, "layout planning must never return an image"
-    assert result.layout is not None
-    assert result.layout["blocks"][0]["text"] == "കേരളം സെയിൽ"
-
-
-def test_ai_altering_the_operators_words_is_undone(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A changed phone number or headline is not acceptable, ever."""
-    plan = {
-        "blocks": [
-            {"id": "headline", "text": "GRAND SALE!!!", "x": 0.1, "y": 0.1},
-            {"id": "phone", "text": "9847 000 111", "x": 0.1, "y": 0.8},
-        ]
-    }
-    fake(monkeypatch, response=FakeResponse([], text=json.dumps(plan)))
-    result = ai.plan_layout({"headline": "Grand Sale", "phone": "9847 000 000"})
-
-    texts = {b["id"]: b["text"] for b in result.layout["blocks"]}
-    assert texts["headline"] == "Grand Sale"
-    assert texts["phone"] == "9847 000 000"
-    assert len(result.warnings) >= 2
-
-
-def test_layout_survives_a_code_fence(monkeypatch: pytest.MonkeyPatch) -> None:
-    wrapped = '```json\n{"blocks": [{"id": "headline", "text": "Sale"}]}\n```'
-    fake(monkeypatch, response=FakeResponse([], text=wrapped))
-    result = ai.plan_layout({"headline": "Sale"})
-    assert result.ok is True
-
-
-@pytest.mark.parametrize(
-    "text", ["not json at all", "{}", '{"blocks": "nope"}', "", "{oops"]
-)
-def test_a_bad_layout_plan_is_an_error_not_a_guess(
-    monkeypatch: pytest.MonkeyPatch, text: str
-) -> None:
-    """Silently dropping a phone number is worse than a visible failure."""
-    fake(monkeypatch, response=FakeResponse([], text=text))
-    result = ai.plan_layout({"headline": "Sale"})
-    assert result.ok is False
+# --- honest disclosure ----------------------------------------------------
 
 
 def test_synthid_watermark_is_disclosed(monkeypatch: pytest.MonkeyPatch) -> None:
     """PRD.md lists this as something to tell a client about."""
     fake(monkeypatch, response=FakeResponse([FakePart(data=b"PNG")]))
-    result = ai.generate_artwork({"subject": "a temple"})
+    result = ai.generate_poster("example-festival", {"main": "Onam Sale"})
     assert any("SynthID" in w for w in result.warnings)
 
 
@@ -310,26 +261,42 @@ def test_defaults_are_seeded_for_every_scope() -> None:
     # Derived, not hardcoded: the point is that every declared scope has a
     # shipped default to restore to, which stays true as scopes are added.
     assert scopes == {s.key for s in prompts.SCOPES}
-    assert "poster-layout" in scopes
+    assert "poster-concept" in scopes
+
+
+def test_a_retired_scopes_shipped_template_is_cleared_out() -> None:
+    """ADR-034 retired three poster scopes. Their seeded rows stayed behind in
+    every database that had already run, listed under a scope the screen has no
+    dropdown for and no default left to restore."""
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO prompts(scope, name, body, is_default, is_active, updated_at) "
+            "VALUES('poster-layout', 'Default', 'old', 1, 1, '2026-01-01') "
+            "ON CONFLICT(scope, name) DO NOTHING"
+        )
+    prompts.seed_defaults()
+    scopes = {p["scope"] for p in prompts.list_prompts()}
+    assert "poster-layout" not in scopes
+
+
+def test_a_prompt_the_operator_wrote_survives_its_scope_being_retired() -> None:
+    """It is theirs. Deleting it to tidy up would be a poor trade."""
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO prompts(scope, name, body, is_default, is_active, updated_at) "
+            "VALUES('poster-layout', 'Mine', 'my own wording', 0, 0, '2026-01-01') "
+            "ON CONFLICT(scope, name) DO NOTHING"
+        )
+    prompts.seed_defaults()
+    kept = [p for p in prompts.list_prompts() if p["name"] == "Mine"]
+    assert kept, "the operator's own template was deleted"
 
 
 def test_seeding_twice_does_not_duplicate() -> None:
     prompts.seed_defaults()
     prompts.seed_defaults()
-    layout = [p for p in prompts.list_prompts("poster-layout") if p["is_default"]]
+    layout = [p for p in prompts.list_prompts("poster-concept") if p["is_default"]]
     assert len(layout) == 1
-
-
-def test_the_layout_default_forbids_text_in_images() -> None:
-    """The one prompt that must not drift — it is the Malayalam guarantee."""
-    body = prompts.SEEDS["poster-layout"]
-    assert "JSON" in body
-    assert "never place text into a picture" in body.lower()
-    assert "exactly" in body.lower(), "the AI must be told not to reword copy"
-
-
-def test_artwork_default_forbids_lettering() -> None:
-    assert "no lettering" in prompts.SEEDS["poster-artwork"].lower()
 
 
 def test_unknown_variable_is_caught_at_edit_time() -> None:
@@ -339,8 +306,8 @@ def test_unknown_variable_is_caught_at_edit_time() -> None:
 
 
 def test_missing_required_variable_is_caught() -> None:
-    problems = prompts.validate("poster-layout", "Make something nice")
-    assert any("headline" in p for p in problems)
+    problems = prompts.validate("poster-concept", "Make something nice")
+    assert any("main" in p for p in problems)
 
 
 def test_a_good_template_has_no_problems() -> None:
@@ -422,7 +389,7 @@ def image_client(monkeypatch: pytest.MonkeyPatch, data: bytes | None = b"PNG") -
 def spend(paise: int) -> None:
     """Put a real amount into the ledger."""
     db.record_spend(
-        feature="poster-artwork", model="m", cost_paise=paise, batch=False, status="ok"
+        feature="poster", model="m", cost_paise=paise, batch=False, status="ok"
     )
 
 
@@ -435,7 +402,7 @@ def test_over_budget_refuses_a_paid_call(monkeypatch: pytest.MonkeyPatch) -> Non
     client = image_client(monkeypatch)
     spend(ai.MONTHLY_BUDGET_PAISE + 1)
 
-    result = ai.generate_artwork({"subject": "a temple"})
+    result = ai.generate_poster("example-festival", {"main": "Onam Sale"})
     assert result.ok is False
     assert "budget" in (result.error or "").lower()
     assert result.cost_paise == 0
@@ -443,16 +410,19 @@ def test_over_budget_refuses_a_paid_call(monkeypatch: pytest.MonkeyPatch) -> Non
     assert client.models.calls == []
 
 
-def test_over_budget_refuses_photo_edit_and_layout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """All three paid routes, not just the one."""
+def test_over_budget_refuses_every_paid_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All of them, not just the one that was easiest to check."""
     image_client(monkeypatch)
     spend(ai.MONTHLY_BUDGET_PAISE + 1)
 
     photo = ai.edit_photo(b"x", "image/png", {"instruction": "tidy it"})
     assert photo.ok is False and "budget" in (photo.error or "").lower()
 
-    layout = ai.plan_layout({"headline": "SALE"})
-    assert layout.ok is False and "budget" in (layout.error or "").lower()
+    concept = ai.poster_concept({"main": "SALE"})
+    assert concept.ok is False and "budget" in (concept.error or "").lower()
+
+    changed = ai.refine_poster(b"x", "image/png", "darker")
+    assert changed.ok is False and "budget" in (changed.error or "").lower()
 
 
 def test_the_operator_can_deliberately_spend_past_the_budget(
@@ -462,63 +432,16 @@ def test_the_operator_can_deliberately_spend_past_the_budget(
     image_client(monkeypatch)
     spend(ai.MONTHLY_BUDGET_PAISE + 1)
 
-    result = ai.generate_artwork({"subject": "a temple"}, over_budget_ok=True)
+    result = ai.generate_poster(
+        "example-festival", {"main": "Onam Sale"}, over_budget_ok=True
+    )
     assert result.ok is True
 
 
 def test_inside_the_budget_nothing_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     image_client(monkeypatch)
     spend(100)
-    assert ai.generate_artwork({"subject": "a temple"}).ok is True
-
-
-# --- a dropped layout block must not pass silently (NEXT.md 1.2) ----------
-
-
-def test_a_layout_block_the_ai_omitted_is_put_back() -> None:
-    """The exact failure `verify_text_unchanged`'s own docstring claimed to stop.
-
-    It only ever repaired blocks that came back, so a layout omitting the phone
-    number passed with no complaint at all.
-    """
-    values = {"headline": "GRAND SALE", "phone": "9847 000 000"}
-    layout = {"blocks": [{"id": "headline", "text": "GRAND SALE", "y": 0.2}]}
-
-    fixed, notes = ai.verify_text_unchanged(layout, values)
-
-    ids = {b["id"] for b in fixed["blocks"]}
-    assert "phone" in ids, "the phone number was silently dropped"
-    phone = next(b for b in fixed["blocks"] if b["id"] == "phone")
-    assert phone["text"] == "9847 000 000"
-    assert any("left out the phone" in n for n in notes), notes
-
-
-def test_a_block_returned_under_a_different_id_is_treated_as_missing() -> None:
-    """Renaming the id is the same failure wearing a hat."""
-    values = {"headline": "GRAND SALE", "phone": "9847 000 000"}
-    layout = {"blocks": [{"id": "telephone", "text": "9847 000 000", "y": 0.8}]}
-
-    fixed, notes = ai.verify_text_unchanged(layout, values)
-    ids = {b["id"] for b in fixed["blocks"]}
-    assert {"headline", "phone"} <= ids
-    assert len(notes) == 2, notes
-
-
-def test_empty_input_fields_are_not_invented() -> None:
-    """A field the operator left blank must not appear on the poster."""
-    values = {"headline": "SALE", "offer": "", "phone": "   "}
-    fixed, notes = ai.verify_text_unchanged(
-        {"blocks": [{"id": "headline", "text": "SALE"}]}, values
-    )
-    assert {b["id"] for b in fixed["blocks"]} == {"headline"}
-    assert notes == []
-
-
-def test_a_layout_with_no_usable_blocks_is_rebuilt() -> None:
-    values = {"headline": "SALE", "phone": "9847 000 000"}
-    fixed, notes = ai.verify_text_unchanged({"blocks": "nonsense"}, values)
-    assert {b["id"] for b in fixed["blocks"]} == {"headline", "phone"}
-    assert notes
+    assert ai.generate_poster("example-festival", {"main": "Onam Sale"}).ok is True
 
 
 # --- auto-repair must not pick a nonsense model (NEXT.md 1.3) -------------
@@ -536,7 +459,7 @@ def test_last_resort_never_picks_an_embedding_model() -> None:
         {"name": "gemini-2.5-flash", "image_output": False},
         {"name": "text-bison-001", "image_output": False},
     ]
-    role = ai.ROLE_BY_KEY["layout"]
+    role = ai.ROLE_BY_KEY["concept"]
     assert ai._safe_last_resort(role, live) == "gemini-2.5-flash"
 
 
@@ -546,7 +469,7 @@ def test_last_resort_matches_the_shape_the_role_needs() -> None:
         {"name": "gemini-2.5-flash-image", "image_output": True},
     ]
     assert (
-        ai._safe_last_resort(ai.ROLE_BY_KEY["artwork"], live) == "gemini-2.5-flash-image"
+        ai._safe_last_resort(ai.ROLE_BY_KEY["poster"], live) == "gemini-2.5-flash-image"
     )
 
 
@@ -557,7 +480,7 @@ def test_last_resort_refuses_rather_than_guessing() -> None:
         {"name": "gemini-2.5-tts", "image_output": False},
         {"name": "veo-3", "image_output": False},
     ]
-    assert ai._safe_last_resort(ai.ROLE_BY_KEY["layout"], live) is None
+    assert ai._safe_last_resort(ai.ROLE_BY_KEY["concept"], live) is None
 
 
 # --- batch that saves nothing (NEXT.md 1.4) ------------------------------
@@ -569,13 +492,13 @@ def test_only_artwork_has_a_batch_discount() -> None:
     True for artwork. For photo editing and layout planning it was a wait for
     nothing, and the toggle was offered anyway.
     """
-    assert ai.has_batch_discount("poster-artwork") is True
+    assert ai.has_batch_discount("poster") is True
     assert ai.has_batch_discount("photo-edit") is False
-    assert ai.has_batch_discount("poster-layout") is False
+    assert ai.has_batch_discount("poster-concept") is False
 
 
 def test_the_estimate_says_whether_batch_saves_anything() -> None:
-    artwork = ai.estimate("poster-artwork", batch=True)
+    artwork = ai.estimate("poster", batch=True)
     assert artwork["batch_discount"] is True
     assert artwork["cost_paise"] < artwork["instant_paise"]
 
@@ -597,7 +520,7 @@ def test_a_reply_with_no_image_does_not_claim_it_was_free(
     a few rupees; asserting "nothing was charged" here drifts one way.
     """
     image_client(monkeypatch, data=None)
-    result = ai.generate_artwork({"subject": "a temple"})
+    result = ai.generate_poster("example-festival", {"main": "Onam Sale"})
     assert result.ok is False
     error = (result.error or "").lower()
     assert "nothing was charged" not in error
@@ -648,253 +571,3 @@ def test_friendly_error_is_the_public_name() -> None:
     assert ai.friendly_error(RuntimeError("deadline exceeded")) == ai._friendly(  # noqa: SLF001
         RuntimeError("deadline exceeded")
     )
-
-
-def test_a_styling_hint_never_becomes_text_on_the_poster() -> None:
-    """`tone` is "festive", not a line of copy.
-
-    The first version of the dropped-block repair re-inserted every non-empty
-    input value, which would have printed the word "festive" on a client's
-    poster. Caught by running the shipped self-check, not by the test suite —
-    hence this test.
-    """
-    values = {
-        "headline": "ONAM SALE",
-        "offer": "40% OFF",
-        "phone": "9876543210",
-        "occasion": "Onam",
-        "tone": "festive",
-    }
-    layout = {"blocks": [{"id": "headline", "text": "ONAM SALE"}]}
-
-    fixed, _ = ai.verify_text_unchanged(layout, values)
-    ids = {b["id"] for b in fixed["blocks"]}
-    assert "tone" not in ids, "a styling hint became a text block"
-    assert ids == {"headline", "offer", "phone", "occasion"}
-
-
-def test_only_known_copy_roles_can_be_re_inserted() -> None:
-    """An unexpected key in the values dict must not reach the poster either."""
-    fixed, _ = ai.verify_text_unchanged(
-        {"blocks": []}, {"headline": "SALE", "internal_note": "do not print"}
-    )
-    assert [b["id"] for b in fixed["blocks"]] == ["headline"]
-
-
-# --- writing the poster's words (ADR-030) ----------------------------------
-#
-# The first AI in this app that authors text a client will read off a printed
-# sheet. The tests that matter are the ones about digits: a fabricated
-# percentage or phone number is a reprint, and ADR-028 already measured this
-# failure class in translation.
-
-
-def _alt(
-    label: str,
-    headline: str,
-    offer: str,
-    malayalam: str = "ഓണം ഓഫർ",
-    malayalam_offer: str = "50% കിഴിവ്",
-) -> dict:
-    return {
-        "id": label.lower(),
-        "label": label,
-        "blocks": [
-            {"id": "headline", "text": headline},
-            {"id": "offer", "text": offer},
-        ],
-        "blocks_ml": [
-            {"id": "headline", "text": malayalam},
-            {"id": "offer", "text": malayalam_offer},
-        ],
-    }
-
-
-def _copy_reply(*alts: dict) -> FakeResponse:
-    return FakeResponse([FakePart(text=json.dumps({"alternatives": list(alts)}))])
-
-
-BRIEF = {"brief": "Onam sale, 50% off gold, Thrissur showroom"}
-
-
-def test_copy_comes_back_as_alternatives_in_both_languages(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake(
-        monkeypatch,
-        response=_copy_reply(
-            _alt("Straight", "Onam Sale", "50% OFF"),
-            _alt("Warm", "Celebrate Onam", "50% OFF"),
-        ),
-    )
-    result = ai.write_copy(BRIEF)
-    assert result.ok, result.error
-    assert result.alternatives is not None
-    assert len(result.alternatives) == 2
-    for alt in result.alternatives:
-        assert alt["blocks"] and alt["blocks_ml"]
-
-
-def test_an_invented_percentage_voids_the_alternative_it_is_in(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The failure this guard exists for. 50% was typed; 80% was not."""
-    fake(
-        monkeypatch,
-        response=_copy_reply(
-            _alt("Honest", "Onam Sale", "50% OFF"),
-            _alt("Invented", "Onam Sale", "80% OFF"),
-        ),
-    )
-    result = ai.write_copy(BRIEF)
-    assert result.ok
-    assert [a["label"] for a in result.alternatives or []] == ["Honest"]
-    assert any("80" in w for w in result.warnings)
-
-
-def test_the_surviving_alternatives_are_still_offered_when_one_is_voided(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two good options is a usable screen; refusing everything is not."""
-    fake(
-        monkeypatch,
-        response=_copy_reply(
-            _alt("A", "Onam Sale", "50% OFF"),
-            _alt("B", "Big Onam Sale", "50% OFF"),
-            _alt("C", "Onam Sale", "₹999 only"),
-        ),
-    )
-    result = ai.write_copy(BRIEF)
-    assert result.ok
-    assert len(result.alternatives or []) == 2
-
-
-def test_every_alternative_being_voided_is_a_refusal_not_a_silent_empty_list(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake(monkeypatch, response=_copy_reply(_alt("Bad", "Sale", "80% OFF")))
-    result = ai.write_copy(BRIEF)
-    assert not result.ok
-    assert result.error and "untouched" in result.error
-    assert result.alternatives is None
-
-
-def test_a_figure_the_operator_typed_survives_verbatim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake(monkeypatch, response=_copy_reply(_alt("A", "Onam Sale", "50% OFF")))
-    result = ai.write_copy(BRIEF)
-    offer = next(b for b in result.alternatives[0]["blocks"] if b["id"] == "offer")
-    assert offer["text"] == "50% OFF"
-
-
-def test_a_reformatted_number_is_not_treated_as_invented(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """"9847 000 000" and "9847000000" are the same number."""
-    fake(monkeypatch, response=_copy_reply(_alt("A", "Call 9847000000", "50% OFF")))
-    result = ai.write_copy({"brief": "Onam sale, 50% off, call 9847 000 000"})
-    assert result.ok, result.warnings
-
-
-def test_a_phone_number_is_never_sent_to_google(monkeypatch: pytest.MonkeyPatch) -> None:
-    """It is the highest-consequence field on the poster and the model has no
-    business writing it, so it never goes into the request at all."""
-    client = fake(monkeypatch, response=_copy_reply(_alt("A", "Onam Sale", "50% OFF")))
-    values = {"brief": "Onam sale, 50% off gold"}
-    result = ai.write_copy(values)
-    sent = json.dumps(client.models.calls[0])
-    assert "9876543210" not in sent
-    assert "9876543210" not in result.prompt_used
-
-
-def test_a_locked_headline_the_ai_rewrote_is_put_back(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Reuses the layout path's guard rather than a second copy of it."""
-    fake(monkeypatch, response=_copy_reply(_alt("A", "Something Else", "50% OFF")))
-    result = ai.write_copy(BRIEF, {"headline": "ONAM MELA"})
-    headline = next(b for b in result.alternatives[0]["blocks"] if b["id"] == "headline")
-    assert headline["text"] == "ONAM MELA"
-    assert any("headline" in w for w in result.warnings)
-
-
-def test_an_alternative_with_no_malayalam_is_dropped(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Malayalam spelled in English letters on a printed poster reads as a mistake."""
-    fake(
-        monkeypatch,
-        response=_copy_reply(
-            _alt(
-                "A",
-                "Onam Sale",
-                "50% OFF",
-                malayalam="Onam Ofar",
-                malayalam_offer="50% Kizhivu",
-            )
-        ),
-    )
-    result = ai.write_copy(BRIEF)
-    assert not result.ok
-    assert any("wrong script" in w for w in result.warnings)
-
-
-def test_an_empty_brief_is_refused_before_any_spend(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = fake(monkeypatch, response=_copy_reply(_alt("A", "x", "y")))
-    result = ai.write_copy({"brief": "   "})
-    assert not result.ok
-    assert client.models.calls == []
-    assert result.cost_paise == 0
-
-
-def test_the_copy_prompt_can_be_read_without_spending(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = fake(monkeypatch, response=_copy_reply(_alt("A", "x", "y")))
-    text = ai.copy_prompt(BRIEF)
-    assert "Onam sale" in text
-    assert client.models.calls == []
-
-
-def test_the_copy_default_forbids_inventing_a_figure_and_asks_for_no_picture() -> None:
-    body = prompts.active_prompt("poster-copy")["body"].lower()
-    assert "never write a number" in body
-    assert "never describe or draw a picture" in body
-
-
-def test_copy_has_no_batch_discount() -> None:
-    """Text-only work has no batch tier, so the toggle stays hidden."""
-    assert not ai.has_batch_discount("poster-copy")
-
-
-def test_copy_costs_more_than_a_layout_plan_and_far_less_than_a_picture() -> None:
-    assert ai.RATES_PAISE["layout"] < ai.RATES_PAISE["copy"] < ai.RATES_PAISE["artwork"]
-
-
-def test_the_copy_model_name_is_a_settable_preference() -> None:
-    """`ai.resolve_models` writes every role's preference back after repairing a
-    stale name, so a role missing from `db.DEFAULTS` turns "Test key" into a
-    500 the first time Google retires a model."""
-    assert ai.PREFERENCE_KEY["copy"] in db.DEFAULTS
-    db.set_preferences({ai.PREFERENCE_KEY["copy"]: "gemini-2.5-pro"})
-    assert ai.model_for("copy") == "gemini-2.5-pro"
-    db.set_preferences({ai.PREFERENCE_KEY["copy"]: ""})
-    assert ai.model_for("copy") == ai.COPY_MODEL
-
-
-def test_every_role_has_a_preference_key_the_database_accepts() -> None:
-    """The general form of the trap above, for whatever role is added next."""
-    for role in ai.ROLES:
-        assert ai.PREFERENCE_KEY[role.key] in db.DEFAULTS, role.key
-
-
-def test_the_layout_path_is_unchanged_when_no_digits_are_allow_listed() -> None:
-    """The digit rule is opt-in, so the eight existing layout tests still describe
-    the behaviour exactly."""
-    layout = {"blocks": [{"id": "headline", "text": "Sale 80% off"}]}
-    verified, notes = ai.verify_text_unchanged(layout, {})
-    assert notes == []
-    assert "fabricated" not in verified["blocks"][0]

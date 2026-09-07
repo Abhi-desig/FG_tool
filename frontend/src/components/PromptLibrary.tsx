@@ -32,7 +32,12 @@ import {
 export function PromptLibrary() {
   const [scopes, setScopes] = useState<PromptScope[]>([])
   const [rows, setRows] = useState<PromptRow[]>([])
-  const [scope, setScope] = useState("poster-layout")
+  /**
+   * Which scope opens first. Empty rather than a guess: `poster-layout` was
+   * hardcoded here and outlived the scope itself (ADR-034), which opened the
+   * library on nothing at all. `refresh` picks the first real scope instead.
+   */
+  const [scope, setScope] = useState("")
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [body, setBody] = useState("")
   const [problems, setProblems] = useState<string[]>([])
@@ -44,7 +49,9 @@ export function PromptLibrary() {
       if (!data) return
       setScopes(data.scopes)
       setRows(data.prompts)
-      const forScope = data.prompts.filter((p) => p.scope === scope)
+      const active = scope || data.scopes[0]?.key || ""
+      if (active !== scope) setScope(active)
+      const forScope = data.prompts.filter((p) => p.scope === active)
       const pick =
         forScope.find((p) => p.id === keepId) ??
         forScope.find((p) => p.is_active) ??
@@ -53,7 +60,17 @@ export function PromptLibrary() {
         setSelectedId(pick.id)
         setBody(pick.body)
         setDirty(false)
+        return
       }
+      // No template for this scope. Clearing is not tidiness: leaving the last
+      // scope's id and body in place showed the operator the wrong prompt in an
+      // editable box, and `save` would have written it back under the *other*
+      // scope's template. An empty box that cannot be saved is the visible
+      // half of the same bug — hence the message the panel now shows instead.
+      setSelectedId(null)
+      setBody("")
+      setDirty(false)
+      setProblems([])
     },
     [scope],
   )
@@ -181,16 +198,29 @@ export function PromptLibrary() {
         </div>
       )}
 
-      <Textarea
-        value={body}
-        onChange={(e) => {
-          setBody(e.target.value)
-          setDirty(true)
-        }}
-        spellCheck={false}
-        className="min-h-[220px] font-mono text-xs"
-        aria-label="Prompt text"
-      />
+      {/*
+        An editable box with nothing behind it is worse than no box: `save`
+        returns early without a template selected, so the operator types, presses
+        Save, and nothing happens and nothing explains why. Say so instead.
+      */}
+      {selected ? (
+        <Textarea
+          value={body}
+          onChange={(e) => {
+            setBody(e.target.value)
+            setDirty(true)
+          }}
+          spellCheck={false}
+          className="min-h-[220px] font-mono text-xs"
+          aria-label="Prompt text"
+        />
+      ) : (
+        <p className="rounded-lg border border-dashed p-4 text-xs text-muted-foreground">
+          No template for this one yet. Restart the app to put the shipped default
+          back — seeding runs at startup and never overwrites anything you have
+          edited.
+        </p>
+      )}
 
       {problems.map((p) => (
         <p key={p} className="text-xs text-[color:var(--warn)]">

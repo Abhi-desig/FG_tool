@@ -20,6 +20,7 @@ import { Separator } from "@/components/ui/separator"
 import {
   ApiError,
   type Assessment,
+  type ImageFacts,
   type Inspection,
   type Job,
   type PrintClass,
@@ -35,6 +36,36 @@ import {
 } from "@/lib/api"
 
 const UNITS: PrintUnit[] = ["feet", "inch", "cm", "mm"]
+
+/**
+ * The lowest DPI a file's own metadata is worth believing.
+ *
+ * A WhatsApp JPEG is routinely stamped 72 DPI. That is a screen convention, not
+ * a claim about print — taking it at its word would open a 1200 px logo at 16.7
+ * inches wide and paint the verdict red on every single upload. Below this, the
+ * print standard is the better assumption.
+ */
+const TRUSTED_DPI = 150
+const ASSUMED_DPI = 300
+
+/** Two decimal places, without the trailing zeros the operator has to delete. */
+function trim(value: number): string {
+  return String(Math.round(value * 100) / 100)
+}
+
+/**
+ * The size this image already is, in inches.
+ *
+ * The operator's first question about a client file is always "can I print this
+ * as it is?", so the boxes open at that answer rather than at a fixed 6×4 feet
+ * that had to be retyped every time.
+ */
+function nativeSize(facts: ImageFacts): [string, string] {
+  const [rawX, rawY] = facts.embedded_dpi ?? [0, 0]
+  const dpiX = rawX >= TRUSTED_DPI ? rawX : ASSUMED_DPI
+  const dpiY = rawY >= TRUSTED_DPI ? rawY : ASSUMED_DPI
+  return [trim(facts.width / dpiX), trim(facts.height / dpiY)]
+}
 
 /**
  * A file size the operator can trust.
@@ -67,9 +98,11 @@ export function ImageTools() {
   const [dragging, setDragging] = useState(false)
 
   const [printClass, setPrintClass] = useState("flex")
-  const [unit, setUnit] = useState<PrintUnit>("feet")
-  const [targetW, setTargetW] = useState("6")
-  const [targetH, setTargetH] = useState("4")
+  // Placeholders only. `accept` replaces all three from the uploaded file before
+  // this panel is ever on screen — it renders only once an inspection exists.
+  const [unit, setUnit] = useState<PrintUnit>("inch")
+  const [targetW, setTargetW] = useState("")
+  const [targetH, setTargetH] = useState("")
   const [scale, setScale] = useState<UpscaleScale>("4x")
 
   const inputRef = useRef<HTMLInputElement>(null)
@@ -94,12 +127,19 @@ export function ImageTools() {
     setFile(next)
     setPreview(URL.createObjectURL(next))
     try {
-      setInspection(await inspectImage(next, unit))
+      const found = await inspectImage(next, "inch")
+      setInspection(found)
+      // Every upload re-opens the size boxes at the image's own size, so the
+      // verdict below describes this file rather than the last one.
+      const [width, height] = nativeSize(found.facts)
+      setUnit("inch")
+      setTargetW(width)
+      setTargetH(height)
     } catch (err: unknown) {
       setInspection(null)
       setError(err instanceof ApiError ? err.message : "Could not read that image.")
     }
-  }, [unit])
+  }, [])
 
   // After a successful enlargement the verdict must describe the NEW pixels —
   // otherwise a red "Not enough" sits above the result that just fixed it.

@@ -7,12 +7,13 @@ glossary path and the model path, and the flags the review grid depends on.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
 from backend import models, textkey
-from backend.features import glossary, translate
+from backend.features import dictionary, glossary, translate
 
 HAS_ENGINE = translate.available_engine() is not None
 needs_engine = pytest.mark.skipif(HAS_ENGINE is False, reason="no engine downloaded")
@@ -182,19 +183,39 @@ def test_single_words_are_not_judged_by_length() -> None:
     assert not any("shorter" in note for note in row.warnings)
 
 
-def test_a_single_word_cell_is_flagged_for_a_read_not_as_an_error() -> None:
-    """NEXT.md 1.6: short no longer means safe, but it is not a proven error.
+def test_a_single_word_cell_is_answered_rather_than_queried() -> None:
+    """NEXT.md 1.6 asked for a warning here. ADR-032 supplies an answer instead.
 
     "Product" really did come back as നിർമ്മാണം — "manufacturing" — with no
-    signal at all. A word-count heuristic structurally cannot fire on one word,
-    and one-word cells are exactly the product names. So it is raised as a
-    *check* rather than a problem: worth reading, not evidence of a defect.
+    signal at all, and a word-count heuristic structurally cannot fire on one
+    word. The old fix was to raise a *check* saying nothing could vouch for it
+    and asking the operator to add a glossary entry. On a price list of nothing
+    but one-word product names that fired on almost every row.
+
+    The library knows the word, so the cell never reaches the model at all.
     """
-    row = translate.Row(source="Product", translation="നിർമ്മാണം")
-    assert row.problems == []
-    assert row.must_fix is False
-    assert row.checks, "a one-word cell with no glossary entry must be surfaced"
-    assert row.needs_attention is True
+    entry = dictionary.lookup("Product")
+    assert entry is not None
+    assert entry.primary != "നിർമ്മാണം"
+
+    row = translate.Row(
+        source="Product", translation=entry.primary, from_dictionary=True
+    )
+    assert row.warnings == []
+    assert row.needs_attention is False
+
+
+def test_the_grid_no_longer_asks_the_operator_to_teach_it_a_word() -> None:
+    """The nag is gone even for a cell the library has never heard of.
+
+    A short cell the model guessed at is still not vouched for by anything —
+    that much is unchanged and true. What changed is that saying so on every
+    such row bought nothing and cost the operator's attention, which is the one
+    thing the review grid needs.
+    """
+    row = translate.Row(source="Zyzzyva", translation="സിസീവ")
+    assert not any("glossary entry" in note for note in row.warnings)
+    assert not any("approved term" in note for note in row.warnings)
 
 
 def test_glossary_rows_are_never_flagged_for_length() -> None:
@@ -230,7 +251,14 @@ def _flag_rows() -> list[tuple[str, str, str, str]]:
         parts = line.split("\t")
         assert len(parts) >= 3, f"malformed golden row: {line!r}"
         note = parts[3] if len(parts) > 3 else ""
-        assert parts[2] in {"problem", "check", "clean"}, parts[2]
+        assert parts[2] in {
+            "problem",
+            "check",
+            "clean",
+            "library",
+            "composed",
+            "gap",
+        }, parts[2]
         rows.append((parts[0], parts[1], parts[2], note))
     return rows
 
@@ -249,10 +277,44 @@ def test_flag_fixture_covers_the_measured_failures() -> None:
     ids=[f"{r[0][:18]}-{r[2]}" for r in FLAG_ROWS],
 )
 def test_golden_review_flags(source: str, output: str, expected: str, note: str) -> None:
-    """Every measured mistranslation must be surfaced, at the right severity."""
+    """Every measured mistranslation must be dealt with, in the right way.
+
+    "Dealt with" is no longer a synonym for "flagged". Since ADR-032 the better
+    outcome for most of these is that the bad output in column two can no longer
+    be produced at all, so those rows assert the word library, not the warning.
+    """
     row = translate.Row(source=source, translation=output)
 
-    if expected == "problem":
+    if expected == "library":
+        entry = dictionary.lookup(source)
+        assert entry is not None, f"{note}: the word library must answer this cell"
+        assert entry.primary != output, f"{note}: the library repeats the bad output"
+        # Exact by construction, so it must also be immune to the heuristics.
+        answered = translate.Row(
+            source=source, translation=entry.primary, from_dictionary=True
+        )
+        assert answered.warnings == [], f"{note}: flagged its own correct answer"
+    elif expected == "composed":
+        built = translate.compose(source, dictionary.phrase_terms())
+        assert built is not None, f"{note}: the trade terms do not cover this cell"
+        assert built != output, f"{note}: composition repeats the bad output"
+        # No English may survive, and no placeholder wreckage either — the two
+        # ways a half-built cell used to reach the client's spreadsheet.
+        assert not re.search(r"[A-Za-z]", built.replace("x", ""))
+        assert "X" not in built
+        composed = translate.Row(
+            source=source, translation=built, from_dictionary=True
+        )
+        assert composed.warnings == [], f"{note}: flagged its own correct answer"
+    elif expected == "gap":
+        # Written down deliberately. Nothing here catches it, and pretending
+        # otherwise with an assertion that passes for the wrong reason is worse
+        # than an accepted gap that is named.
+        assert dictionary.lookup(source) is None, (
+            f"{note}: the library covers this now — reclassify the golden row"
+        )
+        assert row.warnings == [], f"{note}: something fires after all — reclassify"
+    elif expected == "problem":
         assert row.problems, f"{note}: not flagged as a problem"
         assert row.must_fix is True
     elif expected == "check":
@@ -275,10 +337,51 @@ def test_a_dropped_number_is_flagged() -> None:
     assert any("250" in note for note in row.problems)
 
 
-def test_trade_terms_are_flagged_when_the_glossary_does_not_cover_them() -> None:
-    """300 gsm matte -> "300 gsm mathematics" has no structural signal at all."""
-    row = translate.Row(source="300 gsm matte", translation="300 ജിഎസ്എം ഗണിതം")
-    assert any("matte" in note for note in row.checks)
+def test_a_cell_of_trade_terms_is_built_not_translated() -> None:
+    """`300 gsm matte` -> "300 gsm mathematics" has no structural signal at all.
+
+    It is now prevented rather than flagged: every word in the cell is a trade
+    term, so the cell is composed from them and never reaches the model.
+    """
+    built = translate.compose("300 gsm matte", dictionary.phrase_terms())
+    assert built == "300 ജിഎസ്എം മാറ്റ്"
+
+
+def test_a_composed_cell_never_carries_placeholder_debris() -> None:
+    """The regression that made composition necessary, kept as a test.
+
+    Trade terms were first handled by masking, the way glossary terms are.
+    Measured on a real price list on 2026-09-05, that wrote marker wreckage
+    straight into the output: `Flex banner` masked to `X1X X0X` — a cell that
+    was *entirely* markers — and came back as ഫ്ലക്സ് 0X ബാനർ. `6x4 feet`
+    came back as `6x4X അടി`, and `Total amount payable` carried എക്സ്, which is
+    the placeholder's own X transliterated into Malayalam.
+    """
+    phrases = dictionary.phrase_terms()
+    for cell in ("Flex banner", "6x4 feet", "Vinyl sticker", "Art card 300 gsm"):
+        built = translate.compose(cell, phrases)
+        assert built is not None, f"{cell} should be composed outright"
+        assert "X" not in built, f"{cell} carries placeholder debris: {built}"
+        assert "എക്സ്" not in built, f"{cell} carries a transliterated marker"
+        assert "  " not in built, f"{cell} has a doubled space: {built}"
+
+
+def test_composition_keeps_a_size_intact() -> None:
+    """`6x4` is a quotation, not a word. The `x` must survive untouched."""
+    assert translate.compose("6x4 feet", dictionary.phrase_terms()) == "6x4 അടി"
+
+
+def test_a_partly_covered_cell_is_left_whole_for_the_model() -> None:
+    """Refusing is the point. A half-built cell would be worse than none.
+
+    `per` and `payable` are not trade terms, so these two go to the model
+    exactly as the operator's client wrote them — not marked up, not part
+    Malayalam.
+    """
+    phrases = dictionary.phrase_terms()
+    assert translate.compose("Price per kilogram", phrases) is None
+    assert translate.compose("Total amount payable", phrases) is None
+    assert translate.compose("Delivery in three days", phrases) is None
 
 
 def test_trade_terms_covered_by_the_glossary_are_not_flagged() -> None:

@@ -71,8 +71,7 @@ Every template has a name, a scope, body text with `{{variables}}`, and history.
 
 | Scope | Used by | Example variables |
 |---|---|---|
-| `poster-layout` | Phase 4 — asks the AI for a layout plan as JSON | `{{occasion}}` `{{headline}}` `{{offer}}` `{{tone}}` |
-| `poster-artwork` | Phase 5 — generates the background image | `{{subject}}` `{{style}}` `{{palette}}` `{{aspect}}` |
+| `poster-concept` | Phase 4 — turns the poster's words into a visual idea | `{{main}}` `{{h1}}` `{{h2}}` |
 | `photo-edit` | Phase 5 — instructs an edit | `{{instruction}}` `{{preserve}}` |
 | `translation-hint` | Phase 3 — domain context for the translator | `{{client}}` `{{domain}}` |
 
@@ -88,48 +87,50 @@ Every template has a name, a scope, body text with `{{variables}}`, and history.
 - **Preview** — render the template with sample values to see what the model will actually receive.
 - **Active template** per scope; the feature screens use it and show which one is in play.
 
-The poster-layout prompt is the important one. It must reliably return **JSON layout data, never
-image text** — that constraint is the foundation of the Malayalam advantage described in
-[ROADMAP.md](ROADMAP.md) Phase 4, and it belongs in the seeded default.
+`poster-concept` is the only poster template left here, and it is a small one: it describes the
+picture, and its answer fills `{{concept}}` in whichever design the operator picked. **The designs
+themselves are not in this library** — they are files in `data/poster_prompts/`, because they are
+the shop's own work and belong somewhere it can edit, copy and back them up with a text editor
+(ADR-034).
 
 ---
 
-## 2a · Poster design styles
+## 2a · Poster designs
 
-The looks the poster designer offers in step 2, and the fixed prompt behind each one. See
-[ADR-027](DECISIONS.md).
+**Not a settings screen.** The looks the poster designer offers are files, one per design, in
+`data/poster_prompts/`. Adding one is dropping a file in; it appears without restarting the
+server. See [ADR-034](DECISIONS.md) and the README in that folder.
 
-A style is one row in `poster_styles` and carries both halves of a look:
-
-| Field | What it is |
+| Part | What it is |
 |---|---|
-| `key` | Stable handle a poster remembers. Renaming the style is safe; changing this is not. |
-| `body` | The fixed prompt structure. Variables: `{{headline}}` `{{offer}}` `{{occasion}}` `{{phone}}` `{{idea}}` `{{subject}}` `{{palette}}` `{{aspect}}` |
-| `palette` | Colours to ask the AI for, used when the operator has not overridden them |
-| `swatches` | Three hex colours, so the picker shows an appearance rather than a name |
-| `text_defaults` | Background colour, and the colour/size/weight each line takes on |
-
-Six ship seeded: **Festival**, **Big offer**, **Wedding**, **Modern minimal**, **Product shot**,
-**Event banner**.
+| filename | The stable handle. `festival-flex.md` is the design `festival-flex` |
+| `name:` | What the operator sees in the dropdown. Falls back to the filename |
+| `description:` | One line under the dropdown |
+| body | The prompt, after a `---` line. Variables: `{{main}}` `{{h1}}` `{{h2}}` `{{concept}}` |
 
 ### Behaviour
 
-- **The copy is the brief.** The operator's own words are substituted into the style's prompt, so
-  the picture is generated from the message on the poster rather than from a second description.
-- **`{{idea}}`** is the operator's optional own suggestion for the picture. Left empty, its line
-  disappears rather than reaching the model as a bare label.
-- **Every style must forbid lettering.** `styles.validate()` refuses a body that does not, and
-  warns on an unknown or missing variable — a model handed a Malayalam headline will draw it, and
-  will draw it wrong.
-- **See exactly what will be sent.** The designer renders the assembled prompt for free before any
-  paid call, so nothing about the spend is taken on trust.
-- **Restore default** on any seeded style. Only a style the shop added itself can be deleted.
+- **The copy is the brief.** The operator's own tagged words are substituted into the design, so
+  the poster is made from the message rather than from a second description.
+- **`{{concept}}`** is the visual idea. Written by `poster-concept` from the copy, or left empty
+  when the operator supplied a reference picture for the model to work from instead.
+- **An unknown placeholder is emptied, not sent.** A `{{offer}}` a poster cannot fill would
+  otherwise reach Google as a bare label and spend money on a confused request. The line it sat
+  on goes with it, and the mismatch is written to the log so a typo is findable.
+- **A bad file is skipped, never fatal.** One mistyped header must not empty the whole screen.
+- **The prompt body never reaches the browser.** It is the shop's own work, and this tool is shown
+  to clients.
+
+> **What went with the old styles screen.** `poster_styles`, its six seeded looks, its text
+> colours, and `styles.validate()` — which refused any style body that did not forbid lettering.
+> That rule existed because a model handed a Malayalam headline will draw it, and will draw it
+> wrong. It is now the operator's job to read the words on every generated poster.
 
 ---
 
 ## 2b · AI models
 
-Which Gemini model does which job — artwork, photo editing, layout planning. Chosen from a list
+Which Gemini model does which job — posters, photo editing, the visual idea. Chosen from a list
 fetched live from Google, not hardcoded. See [ADR-026](DECISIONS.md).
 
 - **Refresh from Google** lists what the key can actually call.
@@ -229,5 +230,5 @@ at once up front:
 | Phase 1 | The tab, Preferences skeleton, theme |
 | Phase 2 | Models directory, device override, DPI and colour profile |
 | Phase 3 | Clients and glossary management ✅ · translation engine table ✅ |
-| Phase 4 | Prompt library (`poster-layout`) — delivered in Phase 5 alongside the rest |
+| Phase 4 | Poster designs in `data/poster_prompts/`, plus the `poster-concept` template |
 | Phase 5 | API keys ✅ · connection testing ✅ · spend tracking ✅ · full prompt library ✅ |

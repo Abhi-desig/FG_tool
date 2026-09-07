@@ -78,7 +78,16 @@ _MIN_WORDS_TO_JUDGE = 3
 #   6x4 feet      → 6x4 മീറ്റ (metre)         (a unit error on a price list)
 #
 # A word-count heuristic *cannot* fire on a one-word cell, and one-word cells
-# are exactly the product names. These checks exist to cover that hole.
+# are exactly the product names.
+#
+# **Five of those six no longer reach the model at all** (ADR-032). The word
+# library answers them, so the checks below no longer have to carry the whole
+# burden of a vocabulary this engine does not have. What they still carry is
+# damage that is *provable* from the text — a price that vanished, a unit that
+# changed. What they deliberately no longer do is tell the operator to go and
+# teach the tool a word: a price list is nothing but short product names, so
+# that note fired on nearly every row, and a grid where everything is urgent is
+# a grid where nothing is.
 
 # Units the shop actually prices in. A unit that changes between source and
 # output is a defect, not a translation choice — `feet` becoming `metre` on a
@@ -131,42 +140,71 @@ def _numbers(text: str) -> list[str]:
     return _DIGIT_RUN.findall(text)
 
 
-# The shop's own vocabulary. A general-purpose 57M-param model has no idea these
-# are print terms and translates them as ordinary English words: measured,
-# `300 gsm matte` came back as "300 gsm mathematics" and `Brochure` as
-# "breaking". Neither has any structural signal — same word count, same digits —
-# so the only way to catch them is to know which words matter here.
-#
-# Not a translation table: these have no fixed Malayalam and the shop's own
-# preference differs by client. It is a list of words that *must* come from the
-# glossary rather than from the model.
-_TRADE_TERMS = frozenset(
-    {
-        "matte", "matt", "gloss", "glossy", "laminate", "lamination", "gsm",
-        "bleed", "trim", "crop", "cmyk", "rgb", "spot", "pantone", "duplex",
-        "brochure", "leaflet", "flyer", "pamphlet", "standee", "standy",
-        "banner", "flex", "vinyl", "sunboard", "foamboard", "acrylic",
-        "letterhead", "visiting card", "business card", "id card", "invoice book",
-        "bill book", "sticker", "label", "danglers", "dangler", "backdrop",
-        "roll-up", "rollup", "canopy", "hoarding", "signage", "led board",
-        "screen printing", "offset", "digital print", "spiral binding",
-        "perfect binding", "saddle stitch", "die cut", "emboss", "foiling",
-        "uv print", "varnish", "art card", "art paper", "ivory", "kraft",
-    }
-)
+_LATIN_RUN = re.compile(r"[A-Za-z]")
+
+# `6x4` is a size, not a word. The `x` is the only Latin letter allowed to
+# survive into a composed cell — without this exception `6x4 feet` would fail
+# the "is it fully covered?" test on a dimension separator.
+_DIMENSION_X = re.compile(r"(?<=\d)\s*[xX×]\s*(?=\d)")
 
 
-def _trade_terms_in(text: str) -> list[str]:
-    """Print-trade words present in `text`, longest match first."""
-    lowered = text.lower()
-    found = [
-        term
-        for term in _TRADE_TERMS
-        if re.search(rf"(?<![a-z]){re.escape(term)}(?![a-z])", lowered)
-    ]
-    # Longest first so "visiting card" is reported rather than nothing, and so a
-    # message lists the most specific term the operator will recognise.
-    return sorted(found, key=len, reverse=True)
+def compose(text: str, phrases: list[tuple[str, str]]) -> str | None:
+    """Build a whole cell out of trade terms alone, or return None.
+
+    **This replaced masking, and the reason is measured.** Trade terms were
+    first handled the way glossary terms are — lifted out, translated around,
+    put back. That works for the handful of terms one client's glossary holds.
+    Handing the same mechanism ~110 terms that occur in almost every cell did
+    not: `Flex banner` masked to `X1X X0X`, a cell containing nothing but
+    markers, which was then sent to a 57M model to be mangled. Measured output
+    on 2026-09-05, all of it written straight into the client's spreadsheet:
+
+        Flex banner          → ഫ്ലക്സ് 0X ബാനർ      (raw marker debris)
+        6x4 feet             → 6x4X അടി             (marker fused to the size)
+        Total amount payable → എക്സ്1തുക ...        (marker transliterated)
+        300 gsm matte        → 300 ജിഎസ്എംമാറ്റ്     (no space between terms)
+
+    `glossary.py` says it plainly in its own header: **nothing survives every
+    time.** So a cell that is entirely trade terms and numbers is now composed
+    directly and never reaches the model, and a cell that is only partly
+    covered is sent to the model *untouched* rather than half-marked up.
+
+    Safe only because of what is in the overlay. These are loanwords and units
+    in a noun phrase — `Flex banner` → ഫ്ലക്സ് ബാനർ — where Malayalam keeps
+    English word order. It would not be safe over a general dictionary, which
+    is why `phrases` is the curated list and never the whole library.
+    """
+    if not phrases or not _LATIN_RUN.search(text):
+        return None
+
+    result = text
+    matched = False
+    for source, target in phrases:
+        # Longest first, so `visiting card` wins over `card`.
+        pattern = re.compile(
+            rf"(?<!\w){re.escape(source)}(?!\w)" if source[0].isalnum() else re.escape(source),
+            re.IGNORECASE,
+        )
+        if not pattern.search(result):
+            continue
+        # A lambda, not the string: a target is data and must never be read as
+        # a backreference.
+        result = pattern.sub(lambda _match, t=target: t, result)
+        matched = True
+
+    # Any English left means this cell is not ours to answer. Handing back a
+    # half-translated cell would be worse than not answering at all.
+    if not matched or _LATIN_RUN.search(_DIMENSION_X.sub("", result)):
+        return None
+    return re.sub(r"\s{2,}", " ", result).strip()
+
+
+# The shop's own vocabulary used to live here, as a frozenset of words to warn
+# about. It has moved to `data/dictionary/trade-en-ml.tsv`, where each word now
+# carries its approved Malayalam instead of merely raising a flag — the same
+# list, doing the job properly. It is deliberately not duplicated back here: two
+# copies of this vocabulary would drift, and the one that drifted would be the
+# one nobody was reading.
 
 
 @dataclass
@@ -184,6 +222,16 @@ class Row:
     # grid can say why it never reached the model, and so the paid check never
     # pays to second-guess an answer the operator already gave (ADR-029).
     from_memory: bool = False
+    # True when the bundled word library answered this whole cell. Exact by
+    # construction like the two above — a headword lookup, not a guess — so the
+    # heuristics skip it and the paid check does not re-buy it (ADR-032).
+    from_dictionary: bool = False
+    # True when this cell sits in a column the operator marked as names, and was
+    # therefore written by sound rather than translated for meaning. Exact in
+    # the sense that matters — it is a rule, not a guess about meaning — though
+    # English spelling does not mark vowel length, so it is approximate script
+    # rather than a certainty. See `features/translit.py`.
+    from_name: bool = False
     # Terms the model dropped. The operator must place these by hand.
     lost_terms: list[str] = field(default_factory=list)
     # Placeholder wreckage that was cleaned out of the output. Its presence means
@@ -244,7 +292,7 @@ class Row:
             )
 
         # Exact by construction; the rest are guesses.
-        if self.glossary_only or self.from_memory:
+        if self.exact:
             return notes
 
         if not _MALAYALAM.search(target):
@@ -270,21 +318,44 @@ class Row:
         return notes
 
     @property
+    def exact(self) -> bool:
+        """This cell was looked up, not guessed, so no heuristic applies to it.
+
+        The operator's own correction, the client's locked term, and the word
+        library are all exact by construction. Running a suspicion check over
+        any of them can only produce a false alarm about an answer that was
+        already right.
+        """
+        return (
+            self.glossary_only
+            or self.from_memory
+            or self.from_dictionary
+            or self.from_name
+        )
+
+    @property
     def checks(self) -> list[str]:
         """Nothing is provably wrong, but nothing here can vouch for it either.
 
-        These are the rows NEXT.md 1.6 found: a word-count heuristic cannot fire
-        on a one-word cell, and one-word cells are exactly the product names.
+        One check, and only one. A word-count heuristic cannot fire on a
+        one-word cell, and one-word cells are exactly the product names —
         `Standee` came back as the Malayalam for "Saint Kitts and Nevis" with
-        `needs_attention: false`. Short no longer means safe.
+        `needs_attention: false`.
+
+        What used to live here as well were two notes telling the operator to go
+        and add a glossary entry, for print terms and for any short cell. Both
+        are gone. The word library now knows those words, so the advice was
+        being given about cells that are already right, on nearly every row of a
+        price list — which trained the operator to scroll past the colour that
+        also marks a real defect.
         """
         target = self.translation.strip()
-        if not target or self.glossary_only or self.from_memory:
+        if not target or self.exact:
             return []
         if not _MALAYALAM.search(target):
             return []
 
-        notes: list[str] = self._trade_warnings()
+        notes: list[str] = []
         source_words = _word_count(self.source)
         target_words = _word_count(target)
 
@@ -302,26 +373,6 @@ class Row:
                 f"{'' if source_words == 1 else 's'} in English but "
                 f"{target_words} in Malayalam — the model may have translated it "
                 f"as a name or a place. Check it."
-            )
-
-        # The blind spot. A one- or two-word cell is a product name, nothing
-        # above can judge it, and this is where the worst errors were measured —
-        # "Standee" came back as "Saint Kitts and Nevis".
-        #
-        # Skipped when the cell carries a number or a unit: those *are* checked,
-        # exactly, by `_number_warnings` and `_unit_warnings`, so claiming
-        # "nothing here can check it" about `6x4 feet` would be both false and
-        # the start of alert fatigue.
-        if (
-            source_words <= _SHORT_CELL_WORDS
-            and not self.glossary_terms
-            and not _numbers(self.source)
-            and not self._source_units()
-        ):
-            notes.append(
-                f"“{self.source.strip()}” is a short cell with no approved term — "
-                f"nothing here can check it. Read it, and add a glossary entry "
-                f"so it is right every time."
             )
 
         return notes
@@ -370,29 +421,6 @@ class Row:
                 )
 
         return notes
-
-    def _trade_warnings(self) -> list[str]:
-        """Print-trade words the model translated as ordinary English.
-
-        `300 gsm matte` → "300 gsm mathematics" has the same word count and the
-        same digits as a correct translation. Nothing structural can see it. What
-        *is* knowable is that "matte" is a word this shop cannot afford to leave
-        to a general-purpose model.
-        """
-        covered = {term.lower() for term in self.glossary_terms}
-        uncovered = [
-            term
-            for term in _trade_terms_in(self.source)
-            if not any(term in c or c in term for c in covered)
-        ]
-        if not uncovered:
-            return []
-        listed = ", ".join(f"“{term}”" for term in uncovered[:3])
-        return [
-            f"{listed} {'is a print term' if len(uncovered) == 1 else 'are print terms'} "
-            f"with no approved translation — the model guessed. Add "
-            f"{'it' if len(uncovered) == 1 else 'them'} to this client's glossary."
-        ]
 
     def _number_warnings(self, target: str) -> list[str]:
         """Digits are prices and sizes. They must survive exactly."""
@@ -443,6 +471,9 @@ def translate_rows(
     reporter: Reporter | None = None,
     progress_to: float = 0.95,
     memory: dict[str, str] | None = None,
+    dictionary: dict[str, str] | None = None,
+    phrases: list[tuple[str, str]] | None = None,
+    names: dict[str, str] | None = None,
 ) -> list[Row]:
     """Translate distinct strings, applying the glossary around the model.
 
@@ -455,6 +486,13 @@ def translate_rows(
     because a feature module may not import `db`; the router owns storage and
     hands this down as plain data, exactly as it already does with `terms`.
 
+    `dictionary` is the bundled word library, keyed the same way, with the
+    operator's own overrides already merged over it. `phrases` are the print
+    terms it is safe to lock away from the model inside a longer sentence. Both
+    arrive as plain data for the same reason and by the same route — a feature
+    module may not import another feature module, so the router asks
+    `features/dictionary.py` for these and passes them down (ADR-032).
+
     `progress_to` is where this pass leaves the job's bar. It is the whole job
     on its own, but only the first half when the optional Claude check runs
     after it — and a bar that reaches 95% and then restarts reads as a fault.
@@ -464,12 +502,28 @@ def translate_rows(
 
     engine = engine or available_engine() or "opus-mt-en-ml"
 
-    # Split the work three ways: remembered and glossary-only rows need no
-    # model at all. Memory is checked first because a whole cell the operator
-    # approved outranks re-deriving that cell from phrase rules, and is free.
+    # Split the work four ways; only the last needs the model. The order is the
+    # precedence order, and it is not arbitrary — each layer outranks the next
+    # because it is more specifically the operator's own answer:
+    #
+    #   1. memory      the cell this operator approved by hand, on this shop's work
+    #   2. names       a column the operator marked: written by sound, never translated
+    #   3. glossary    this client's locked wording
+    #   4. dictionary  a headword the shop ships, right for anyone
+    #   5. model       a guess
+    #
+    # Names sit second because the operator ticked that column: a cell in it is
+    # a person or a place, and no amount of glossary or dictionary coverage
+    # makes ഏലക്കായ the right answer for a member called Cardamom. Only their
+    # own earlier correction of that exact cell outranks it.
     memory = memory or {}
+    dictionary = dictionary or {}
+    phrases = phrases or []
+    names = names or {}
     direct: dict[int, Row] = {}
     remembered_count = 0
+    dictionary_count = 0
+    name_count = 0
     needs_model: list[tuple[int, gl.Masked]] = []
 
     no_glossary = not terms
@@ -484,6 +538,17 @@ def translate_rows(
             )
             remembered_count += 1
             continue
+
+        written = names.get(source)
+        if written:
+            direct[index] = Row(
+                source=source,
+                translation=written,
+                from_name=True,
+            )
+            name_count += 1
+            continue
+
         masked = gl.mask(source, terms)
         if gl.is_fully_covered(source, terms):
             restored = gl.restore(masked.text, masked)
@@ -493,14 +558,43 @@ def translate_rows(
                 glossary_terms=masked.matched,
                 glossary_only=True,
             )
-        else:
-            needs_model.append((index, masked))
+            continue
+
+        # Only when the glossary matched *nothing* in this cell. A cell the
+        # glossary touched but did not cover goes to the model with that term
+        # masked, so the client's own approved wording is never quietly
+        # replaced by a general dictionary's idea of the same word.
+        if not masked.terms:
+            # A headword first, then a cell built entirely out of trade terms
+            # and numbers — `Flex banner`, `Art card 300 gsm`, `6x4 feet`.
+            answer = dictionary.get(textkey.normalise(source)) or compose(
+                source, phrases
+            )
+            if answer:
+                direct[index] = Row(
+                    source=source,
+                    translation=answer,
+                    from_dictionary=True,
+                )
+                dictionary_count += 1
+                continue
+
+        # Untouched by the library. A partly-covered cell is deliberately *not*
+        # half-marked-up before it goes to the model — see `compose`.
+        needs_model.append((index, masked))
 
     if reporter:
         already = []
         if remembered_count:
             already.append(f"{remembered_count} rows from your corrections")
-        already.append(f"{len(direct) - remembered_count} from the glossary")
+        if name_count:
+            already.append(f"{name_count} names written by sound")
+        if dictionary_count:
+            already.append(f"{dictionary_count} from the word library")
+        already.append(
+            f"{len(direct) - remembered_count - dictionary_count - name_count} "
+            f"from the glossary"
+        )
         reporter.step(
             f"{', '.join(already)}, {len(needs_model)} to translate…",
             0.1,

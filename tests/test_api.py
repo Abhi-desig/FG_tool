@@ -242,3 +242,25 @@ def test_the_unicode_direction_reports_nothing() -> None:
         "/api/fonts/convert", json={"text": "HmWw", "direction": "to_unicode"}
     ).json()
     assert body["unconvertible"] == []
+
+
+def test_index_html_is_never_cached_but_hashed_assets_are() -> None:
+    """The failure this stops: after a rebuild the app kept serving the old
+    bundle, because `index.html` was cached and it is the only file that names
+    the current hash. Fixes landed, `dist` was rebuilt, and the screen stayed
+    exactly as broken as before — indistinguishable from the fix not working."""
+    from backend import config
+
+    if not config.FRONTEND_DIST.is_dir():
+        pytest.skip("frontend/dist is not built")
+
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "no-cache" in page.headers.get("cache-control", "")
+
+    asset = next(config.FRONTEND_DIST.glob("assets/index-*.js"), None)
+    assert asset is not None, "no hashed bundle in frontend/dist"
+    served = client.get(f"/assets/{asset.name}")
+    assert served.status_code == 200
+    # Safe to cache forever: a new build has a new filename.
+    assert "max-age=31536000" in served.headers.get("cache-control", "")

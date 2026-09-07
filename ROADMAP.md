@@ -166,57 +166,50 @@ NLLB-200 would have been the obvious engine and is **rejected on licence**
 
 ---
 
-## Phase 4 · Posters ← built, needs a real print
+## Phase 4 · Posters ← rebuilt, unproven against the live API
 
-Start with plain templates and **no AI at all**. Add AI artwork in Phase 5.
+**Rebuilt on 2026-09-06 (ADR-034), and the golden rule it was built on is gone.**
+It used to read *"AI makes the picture, the app makes the text"* — the AI returned
+a layout plan as data and the app drew every word as real SVG `<text>`, which is
+what made correct Malayalam and CorelDRAW-editable output possible.
 
-**The golden rule: AI makes the picture, the app makes the text.**
+The operator now has their own finished set of poster-design prompts, so the
+whole poster is generated instead:
 
-The AI returns a layout plan as *data*, never as pixels:
+1. Paste the copy, tagged `main:`, `h1:`, `h2:`.
+2. Optionally add a reference picture. Without one, a cheap text call turns the
+   copy into a visual idea.
+3. Pick one of the designs in `data/poster_prompts/`.
+4. Gemini draws the finished poster, words and all.
+5. Regenerate, or describe a change and have it applied to that same image.
 
-```json
-{
-  "headline": {"text": "GRAND SALE",  "position": "top",    "size": "large", "colour": "white"},
-  "offer":    {"text": "50% OFF",     "position": "middle", "size": "huge",  "colour": "yellow"},
-  "phone":    {"text": "9847XXXXXX",  "position": "bottom", "size": "small", "colour": "white"}
-}
-```
-
-The app draws real text at those positions in real fonts — always sharp, always spelled right,
-always editable. **Malayalam works perfectly because it never touches the AI.** This is the shop's
-single biggest advantage over Canva.
-
-Three touches worth building:
-- **Auto colour** — sample background brightness behind each text box, flip text light or dark so it
-  is never unreadable
-- **Empty-space finding** — scan for the calmest region of the image and place text there
-- **Print safe zone** — text dragged too near the edge turns red, because trimming will cut it off
+**Scope:** `features/posters.py` reads the design folder; `features/ai.py` makes
+the calls; one screen. Deleted with the old phase: the canvas editor, layout
+presets, design styles, the SVG export, `POSTER_LAYOUTS.md`, and roughly 8,000
+lines around them.
 
 **Exit gate**
-- [x] A **Malayalam** poster exports with text sharp and **editable** — SVG with real
-      `<text>` elements, zero `<path>`, physical mm dimensions. Asserted by
-      `test_svg_carries_real_text_not_paths`
-- [x] Text objects remain selectable and repositionable — DOM boxes, draggable and
-      keyboard-nudgeable (ADR-020)
-- [x] Safe-zone warning fires — dashed trim guide plus a per-block red ring and a
-      written warning
-- [x] Auto colour picks light or dark from the luminance behind each line, and
-      auto-placement spreads lines across the canvas without overlapping
-- [ ] **Auto colour never produces unreadable text on a real photo** — needs your
-      client photographs, not synthetic gradients
-- [ ] **A real print** confirms the safe margin is right for your printer
+- [x] A design dropped into the folder appears without restarting the server
+- [x] The copy is read back before anything is spent, so `h1`/`h2` cannot be
+      silently swapped
+- [x] A refused call is a 200 with a plain reason and the operator's copy intact
+- [x] The copy as typed is shown beside every poster, with the warning that the
+      app cannot check the words
+- [ ] **One real call proves the response shapes** — shared with Phase 5 below,
+      and still never made
+- [ ] A poster the shop would actually send a client, within two or three attempts
+- [ ] **A real print.** Nothing above says whether generating the whole poster
+      was the right trade; only a print does
 
-### What Phase 4 changed about the plan
+### What the rebuild gave up
 
-| Assumption | Reality |
+Written down because it is not recoverable by trying harder:
+
+| Was guaranteed | Now |
 |---|---|
-| Export a 300 DPI image | **SVG**, because "editable" rules out raster. The PNG is only a proof |
-| Backend renders the poster | **It cannot.** Pillow has no Raqm, so it mis-shapes every Malayalam conjunct. The browser renders the proof (ADR-019) |
-| Fabric.js canvas | **DOM text boxes** — native Malayalam shaping, keyboard operable, zero new dependencies (ADR-020) |
-
-The Phase 1 converter turned out to be the key to Phase 4: a block set to
-`ML-TTKarthika` export mode is run through it, so the glyph order is already the
-visual order and **no shaping engine is needed anywhere in the chain**.
+| Malayalam spelled correctly | **Not.** Image models do not shape complex scripts (ADR-019 measured it) |
+| Every line editable in CorelDRAW | **Not.** The poster is a raster; a typo means generating again |
+| No figure the operator did not type | **Not enforceable.** ADR-030's rule can only be asked for in the prompt now |
 
 ---
 

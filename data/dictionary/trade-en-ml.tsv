@@ -1,0 +1,155 @@
+# The shop's own vocabulary. Sits ABOVE Olam and wins over it.
+#
+# Olam is a general dictionary and it is wrong about this trade, confidently:
+# it renders `flex` as മടക്കുക ("to fold"), `card` as തടിച്ച കടലാസ് ("thick
+# paper"), and it has never heard of `standee`, `matte`, `visiting card` or
+# `vinyl` at all. On a price list those are quotations for the wrong thing.
+#
+# Nearly every term here is an English loanword written in Malayalam script,
+# because that is what Kerala print shops say out loud. Where a genuine
+# Malayalam word is in ordinary use (ലഘുലേഖ for a pamphlet) it is used instead.
+#
+# REVIEW THIS FILE ONCE. It is short on purpose. Anything wrong can be fixed
+# here, or overridden from the Word library panel in the Excel tab without
+# touching the file at all.
+#
+# Columns: english <TAB> primary <TAB> other|meanings|pipe-separated
+# Lines starting with # are ignored. Keep it sorted; keep it small.
+
+# --- surfaces and stock ---------------------------------------------------
+art card	ആർട്ട് കാർഡ്
+art paper	ആർട്ട് പേപ്പർ
+acrylic	അക്രിലിക്
+board	ബോർഡ്
+card	കാർഡ്	തടിച്ച കടലാസ്
+foamboard	ഫോം ബോർഡ്
+ivory	ഐവറി
+kraft	ക്രാഫ്റ്റ്
+paper	പേപ്പർ	കടലാസ്
+sunboard	സൺബോർഡ്
+vinyl	വിനൈൽ
+flex	ഫ്ലക്സ്
+
+# --- products the shop sells ----------------------------------------------
+backdrop	ബാക്ക്ഡ്രോപ്പ്
+banner	ബാനർ
+bill book	ബിൽ ബുക്ക്
+brochure	ബ്രോഷർ	ലഘുലേഖ
+business card	ബിസിനസ് കാർഡ്
+canopy	കനോപ്പി
+dangler	ഡാങ്ലർ
+danglers	ഡാങ്ലറുകൾ
+flyer	ഫ്ലയർ
+hoarding	ഹോർഡിംഗ്
+id card	ഐഡി കാർഡ്
+invoice book	ഇൻവോയ്സ് ബുക്ക്
+label	ലേബൽ
+led board	എൽഇഡി ബോർഡ്
+leaflet	ലീഫ്‌ലെറ്റ്	ലഘുലേഖ
+letterhead	ലെറ്റർഹെഡ്
+pamphlet	ലഘുലേഖ
+poster	പോസ്റ്റർ	ചുവർപരസ്യം
+roll-up	റോൾഅപ്പ്
+rollup	റോൾഅപ്പ്
+signage	സൈനേജ്
+standee	സ്റ്റാൻഡി
+standy	സ്റ്റാൻഡി
+sticker	സ്റ്റിക്കർ
+visiting card	വിസിറ്റിംഗ് കാർഡ്
+
+# --- finishes and processes -----------------------------------------------
+die cut	ഡൈ കട്ട്
+digital print	ഡിജിറ്റൽ പ്രിന്റ്
+emboss	എംബോസ്
+foiling	ഫോയിലിംഗ്
+gloss	ഗ്ലോസ്	തിളക്കം
+glossy	ഗ്ലോസി
+laminate	ലാമിനേഷൻ
+lamination	ലാമിനേഷൻ
+matt	മാറ്റ്
+matte	മാറ്റ്
+offset	ഓഫ്സെറ്റ്
+perfect binding	പെർഫെക്റ്റ് ബൈൻഡിംഗ്
+print	പ്രിന്റ്	അച്ചടി
+printing	പ്രിന്റിംഗ്	അച്ചടി
+saddle stitch	സാഡിൽ സ്റ്റിച്ച്
+screen printing	സ്ക്രീൻ പ്രിന്റിംഗ്
+spiral binding	സ്പൈറൽ ബൈൻഡിംഗ്
+uv print	യുവി പ്രിന്റ്
+varnish	വാർണിഷ്
+
+# --- pre-press terms ------------------------------------------------------
+bleed	ബ്ലീഡ്
+cmyk	സിഎംവൈകെ
+crop	ക്രോപ്പ്
+duplex	ഡ്യൂപ്ലെക്സ്
+pantone	പാന്റോൺ
+rgb	ആർജിബി
+spot	സ്പോട്ട്
+trim	ട്രിം
+
+# --- what a price list is made of -----------------------------------------
+# Olam has all of these, but as *definitions*: it renders `product` as
+# ഫാക്ടറിയിൽ നിർമ്മിച്ച വസ്തു, "an item manufactured in a factory". True, and
+# useless as a column header on a quotation.
+amount	തുക
+code	കോഡ്
+customer	ഉപഭോക്താവ്
+date	തീയതി
+description	വിവരണം
+discount	കിഴിവ്
+gst	ജിഎസ്ടി
+item	ഇനം
+name	പേര്
+price	വില
+product	ഉൽപ്പന്നം
+quantity	എണ്ണം	അളവ്
+qty	എണ്ണം
+rate	നിരക്ക്
+size	വലുപ്പം	സൈസ്
+total	ആകെ	മൊത്തം
+
+# --- what a member list is made of ----------------------------------------
+# The headings of the sheets the shop is actually handed. They sit at the top of
+# every column the client reads first, and Olam gets several of them plainly
+# wrong: it renders `place` as സ്ഥാപിക്കുക, "to establish".
+address	വിലാസം
+age	വയസ്സ്
+district	ജില്ല
+email	ഇമെയിൽ
+father	അച്ഛൻ
+guardian	രക്ഷിതാവ്
+house	വീട്	ഹൗസ്
+house name	വീട്ട്‌പേര്
+member	അംഗം
+mobile	മൊബൈൽ
+mother	അമ്മ
+number	നമ്പർ
+phone	ഫോൺ
+pin code	പിൻ കോഡ്
+place	സ്ഥലം
+post office	പോസ്റ്റ് ഓഫീസ്
+signature	ഒപ്പ്
+village	ഗ്രാമം
+
+# --- units ----------------------------------------------------------------
+# Taken from `_UNIT_WORDS` in backend/features/translate.py, which is the form
+# the review grid already checks a translation against. These two must agree:
+# a unit the dictionary writes one way and the checker expects another way
+# would flag every correct row.
+centimetre	സെന്റിമീറ്റർ
+cm	സെന്റിമീറ്റർ
+feet	അടി
+foot	അടി
+gram	ഗ്രാം
+gsm	ജിഎസ്എം
+inch	ഇഞ്ച്
+inches	ഇഞ്ച്
+kilogram	കിലോഗ്രാം	കിലോ
+kilo	കിലോ
+litre	ലിറ്റർ
+liter	ലിറ്റർ
+metre	മീറ്റർ
+meter	മീറ്റർ
+millimetre	മില്ലിമീറ്റർ
+mm	മില്ലിമീറ്റർ

@@ -159,6 +159,71 @@ def apply(data: bytes, translations: dict[str, str]) -> bytes:
     return buffer.getvalue()
 
 
+@dataclass
+class Column:
+    """One column of a sheet, described well enough to tick a box about it."""
+
+    sheet: str
+    letter: str
+    # The topmost cell, which on a real sheet is nearly always the heading.
+    header: str
+    count: int
+    # A few values from further down, so the operator can recognise the column
+    # without opening the workbook beside the app.
+    sample: list[str] = field(default_factory=list)
+
+
+# Headings that say "this column is people and places" outright. Matched on the
+# whole heading, casefolded — a substring test would catch "Product name".
+_NAME_HEADERS = frozenset(
+    {
+        "name", "names", "full name", "member name", "customer name",
+        "guardian", "guardian name", "father", "father's name", "fathers name",
+        "husband", "husband's name", "spouse", "house", "house name",
+        "house no", "address", "place", "village", "post", "post office",
+        "district", "city", "town", "street", "applicant", "applicant name",
+        "beneficiary", "nominee", "contact person", "proprietor", "owner",
+    }
+)
+
+SAMPLE_SIZE = 3
+
+
+def columns(extraction: Extraction) -> list[Column]:
+    """Every column that has translatable text, in sheet then column order."""
+    grouped: dict[tuple[str, int], list[Cell]] = {}
+    for cell in extraction.cells:
+        grouped.setdefault((cell.sheet, cell.column), []).append(cell)
+
+    out: list[Column] = []
+    for (sheet, number), cells in grouped.items():
+        ordered = sorted(cells, key=lambda c: c.row)
+        out.append(
+            Column(
+                sheet=sheet,
+                letter=get_column_letter(number),
+                header=ordered[0].source if ordered else "",
+                count=len(ordered),
+                sample=[c.source for c in ordered[1 : 1 + SAMPLE_SIZE]],
+            )
+        )
+    return sorted(out, key=lambda c: (extraction.sheets.index(c.sheet), c.letter))
+
+
+def looks_like_names(column: Column) -> bool:
+    """Whether to pre-tick this column as names.
+
+    A suggestion the operator confirms, never a decision taken for them: writing
+    a real word by sound is exactly as wrong as translating a name, so the cost
+    of guessing this one is symmetrical and the operator is the one who knows.
+
+    Only the heading is read. Guessing from the *values* was tried and dropped —
+    on a member list every column is unknown words in title case, including the
+    ones holding occupations and account types.
+    """
+    return column.header.strip().casefold().rstrip(":") in _NAME_HEADERS
+
+
 def unique_sources(cells: list[Cell]) -> list[str]:
     """Distinct source strings, order preserved.
 
@@ -261,6 +326,43 @@ def read_pairs(data: bytes, limit: int = 50_000) -> PairSheet:
     # looking wrong — it silently fills cells with English on the next sheet.
     result.looks_swapped = malayalam_english > english_malayalam and malayalam_english > 0
     return result
+
+
+def write_dictionary(rows: list[tuple[str, str, str, str]]) -> bytes:
+    """The word library as a spreadsheet: English, Malayalam, alternatives, origin.
+
+    Columns A and B are the pair, in that order and in those positions, so
+    `read_pairs` can load an edited copy straight back without a second reader —
+    including its swapped-column guard. C and D are for the operator to read:
+    the other meanings the dictionary holds, and where this row came from.
+
+    Deliberately a sibling of `write_pairs` rather than a fourth parameter on it.
+    The two sheets answer different questions, and a writer that quietly changed
+    its own column layout depending on an argument is how a round trip starts
+    loading the wrong column into the memory.
+    """
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Word library"
+    sheet.append(["English", "Malayalam", "Other meanings", "Where from"])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+
+    for index, (source, target, alternatives, origin) in enumerate(rows):
+        sheet.append([source, target, alternatives, origin])
+        # The shop's own Malayalam font, so these columns are readable in Excel
+        # rather than a row of boxes.
+        for column in (2, 3):
+            sheet.cell(row=index + 2, column=column).font = Font(name="Nirmala UI")
+
+    sheet.freeze_panes = "A2"
+    for column, width in (("A", 40), ("B", 40), ("C", 60), ("D", 14)):
+        sheet.column_dimensions[column].width = width
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    return buffer.getvalue()
 
 
 def write_pairs(

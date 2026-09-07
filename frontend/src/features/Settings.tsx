@@ -5,7 +5,6 @@ import { AiModels } from "@/components/AiModels"
 import { ApiKeys } from "@/components/ApiKeys"
 import { CorrectionsManager } from "@/components/CorrectionsManager"
 import { GlossaryManager } from "@/components/GlossaryManager"
-import { PosterStyles } from "@/components/PosterStyles"
 import { PromptLibrary } from "@/components/PromptLibrary"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -315,8 +314,6 @@ export function Settings() {
           forceMount
           className="space-y-5 data-[state=inactive]:hidden"
         >
-          <PosterStyles />
-
           <PromptLibrary />
         </TabsContent>
       </Tabs>

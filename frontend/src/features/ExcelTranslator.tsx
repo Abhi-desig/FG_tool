@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { JobProgress } from "@/components/JobProgress"
+import { NameColumns } from "@/components/NameColumns"
+import { WordLibrary } from "@/components/WordLibrary"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -59,6 +61,13 @@ function rememberedClient(): string {
 export function ExcelTranslator() {
   const [file, setFile] = useState<File | null>(null)
   const [info, setInfo] = useState<SheetInfo | null>(null)
+  /**
+   * Columns holding people and places. Seeded from the server's suggestion the
+   * first time a sheet is inspected, then owned by the operator — re-inspecting
+   * on a client change must not silently undo their ticks.
+   */
+  const [nameColumns, setNameColumns] = useState<Set<string>>(new Set())
+  const seededFor = useRef<string | null>(null)
   const [clients, setClients] = useState<ClientRow[]>([])
   const [clientId, setClientId] = useState<string>(rememberedClient)
   const [job, setJob] = useState<Job | null>(null)
@@ -119,6 +128,8 @@ export function ExcelTranslator() {
     setRows([])
     setEdits({})
     setInfo(null)
+    setNameColumns(new Set())
+    seededFor.current = null
     setFile(next)
     setCheckWithClaude(false)
     setOverBudgetOk(false)
@@ -141,7 +152,21 @@ export function ExcelTranslator() {
     const run = ++inspectRun.current
     inspectSheet(file, clientId === "none" ? null : Number(clientId))
       .then((next) => {
-        if (inspectRun.current === run) setInfo(next)
+        if (inspectRun.current !== run) return
+        setInfo(next)
+        // Once per file — `accept` clears this, nothing else does. The sheet is
+        // re-inspected on every client change, and re-seeding there would undo
+        // the operator's own ticks under them.
+        if (seededFor.current === null) {
+          seededFor.current = file.name
+          setNameColumns(
+            new Set(
+              (next.columns ?? [])
+                .filter((c) => c.looks_like_names)
+                .map((c) => c.key),
+            ),
+          )
+        }
       })
       .catch((err: unknown) => {
         if (inspectRun.current !== run) return
@@ -173,12 +198,13 @@ export function ExcelTranslator() {
         await startTranslate(file, clientId === "none" ? null : Number(clientId), {
           checkWithClaude,
           overBudgetOk,
+          nameColumns: [...nameColumns],
         }),
       )
     } catch (err: unknown) {
       setError(err instanceof ApiError ? err.message : "Could not start translating.")
     }
-  }, [file, clientId, checkWithClaude, overBudgetOk])
+  }, [file, clientId, checkWithClaude, overBudgetOk, nameColumns])
 
   const download = useCallback(async () => {
     if (!job) return
@@ -246,6 +272,25 @@ export function ExcelTranslator() {
     [rows],
   )
 
+  /**
+   * How much of this sheet is already answered, and by which layer.
+   *
+   * Three sources now, and they are worth naming separately: the operator's own
+   * corrections and the client's glossary are their work, while the word
+   * library is the tool's. Lumping them together would hide the fact that the
+   * shop's own approved terms are being applied at all.
+   */
+  const covered = useMemo(() => {
+    const memory = info?.from_memory ?? 0
+    const glossary = info?.from_glossary ?? 0
+    const library = info?.from_dictionary ?? 0
+    const parts: string[] = []
+    if (memory) parts.push(`${memory.toLocaleString()} from your corrections`)
+    if (glossary) parts.push(`${glossary.toLocaleString()} from the glossary`)
+    if (library) parts.push(`${library.toLocaleString()} from the word library`)
+    return { total: memory + glossary + library, detail: parts.join(", ") }
+  }, [info])
+
   return (
     <div className="space-y-5">
       <header className="flex flex-wrap items-center justify-between gap-3">
@@ -296,6 +341,14 @@ export function ExcelTranslator() {
         </button>
       )}
 
+      {/*
+        Shown before a sheet is loaded and again beneath the review grid. The
+        two moments the operator wants it are "what does this thing already
+        know?" and "why did it say that?", and neither is served by hiding it
+        in Settings.
+      */}
+      {!file && <WordLibrary />}
+
       <input
         ref={inputRef}
         type="file"
@@ -313,6 +366,16 @@ export function ExcelTranslator() {
         </p>
       )}
 
+      {/* Asked before Translate, because it changes what the run does — and
+          hidden once the grid exists, where it would only be confusing. */}
+      {file && info && !job && (
+        <NameColumns
+          columns={info.columns ?? []}
+          picked={nameColumns}
+          onChange={setNameColumns}
+        />
+      )}
+
       {file && info && (
         <div className="flex flex-wrap items-end gap-4 rounded-xl border bg-card p-4">
           <div className="min-w-[200px] flex-1">
@@ -323,19 +386,12 @@ export function ExcelTranslator() {
               {info.skipped_formulas > 0 &&
                 ` · ${info.skipped_formulas} formulas left alone`}
             </p>
-            {(info.from_memory ?? 0) + (info.from_glossary ?? 0) > 0 && (
+            {covered.total > 0 && (
               <p className="mt-1 text-xs text-[color:var(--ok)]">
-                {(
-                  (info.from_memory ?? 0) + (info.from_glossary ?? 0)
-                ).toLocaleString()}{" "}
-                of these{" "}
-                {(info.from_memory ?? 0) + (info.from_glossary ?? 0) === 1
-                  ? "is"
-                  : "are"}{" "}
-                already approved
-                {(info.from_memory ?? 0) > 0 &&
-                  ` (${info.from_memory!.toLocaleString()} from your corrections)`}{" "}
-                — filled in free, without the model.
+                {covered.total.toLocaleString()} of these{" "}
+                {covered.total === 1 ? "is" : "are"} already known
+                {covered.detail && ` (${covered.detail})`} — filled in free, without
+                the model.
               </p>
             )}
           </div>
@@ -635,7 +691,10 @@ export function ExcelTranslator() {
                         would leave the operator no way to tell why the cell was
                         already filled in.
                       */}
-                      {(row.glossary_terms.length > 0 || row.from_memory) && (
+                      {(row.glossary_terms.length > 0 ||
+                        row.from_memory ||
+                        row.from_dictionary ||
+                        row.from_name) && (
                         <div className="mt-1 flex flex-wrap gap-1">
                           {row.glossary_terms.map((t) => (
                             <Badge key={t} variant="outline" className="text-[11px]">
@@ -650,6 +709,16 @@ export function ExcelTranslator() {
                           {row.from_memory && (
                             <Badge variant="secondary" className="text-[11px]">
                               from memory
+                            </Badge>
+                          )}
+                          {row.from_dictionary && (
+                            <Badge variant="secondary" className="text-[11px]">
+                              from word library
+                            </Badge>
+                          )}
+                          {row.from_name && (
+                            <Badge variant="secondary" className="text-[11px]">
+                              written by sound
                             </Badge>
                           )}
                         </div>
@@ -704,6 +773,10 @@ export function ExcelTranslator() {
             Nothing has been written yet. Your edits are applied only when you export, and
             formatting, formulas and numbers are left untouched.
           </p>
+
+          {/* The other moment it is wanted: a row reads wrong and the operator
+              wants to fix the word itself, for every sheet, not just this one. */}
+          <WordLibrary />
         </>
       )}
     </div>

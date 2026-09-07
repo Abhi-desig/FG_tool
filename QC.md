@@ -98,7 +98,8 @@ robustness · **P3** operator-visible polish · **P4** process.
 - [ ] Facts line: sheets, cells to translate, distinct strings, formulas left alone.
 - [ ] **Change the client dropdown** → the sheet is re-inspected and the quote changes.
 - [ ] With corrections stored, the green line reads "N of these **is/are** already
-      approved" and the grammar matches the number.
+      known" and the grammar matches the number. With a sheet of product names it also
+      names the word library as one of the sources.
 - [ ] `No glossary` → the warning says client terms are off **and** that remembered
       corrections still apply.
 - [ ] `Malayalam check` → the Claude option is disabled with no Anthropic key.
@@ -112,6 +113,12 @@ robustness · **P3** operator-visible polish · **P4** process.
 - [ ] Rows needing attention are tinted, and `must_fix` is redder than `needs_attention`.
 - [ ] A row filled from memory carries a **from memory** badge and **no warnings**.
 - [ ] A glossary-only row carries **from glossary** and was never sent to Claude.
+- [ ] A row like `Standee` carries **from word library**, has no warnings, and is
+      correct Malayalam — not the country. *(ADR-032; this is the whole feature.)*
+- [ ] The grid **never** says "add a glossary entry" or "nothing here can check it".
+      Those nags are gone; a price list should now be mostly quiet.
+- [ ] A genuinely wrong row still shouts: plant a wrong price or a `feet`→`metre` and
+      confirm it is still flagged red.
 - [ ] `Show only these` / `Show all rows` toggles.
 - [ ] Edit a Malayalam cell → the advisory count beside `Remember my corrections` moves.
 - [ ] `Export .xlsx` downloads, and the toast says how many corrections were remembered.
@@ -119,35 +126,76 @@ robustness · **P3** operator-visible polish · **P4** process.
 - [ ] Untick `Remember my corrections`, export → nothing new is remembered.
 - [ ] `Choose another` resets cleanly.
 
-## E · Poster designer
+### D1 · Name columns *(ADR-033)*
 
-- [ ] Paste a WhatsApp message → it auto-splits on paste; `Sort it out` also works.
-- [ ] Lines it could not place are announced as extra lines, never dropped.
-- [ ] The four role fields are editable and drive the canvas.
-- [ ] **AI wording:** brief box, `Leaves this computer` notice naming the phone
-      exclusion, live ₹ quote, and `See exactly what will be sent` — all free.
-- [ ] Press `Write the words` → three alternatives, English beside Malayalam.
-- [ ] `Use this` on one field changes only that field; `Use English` / `Use Malayalam`
-      change the set.
-- [ ] An alternative that invented a figure is **absent**, and a warning says which figure.
-- [ ] The phone number on the poster is the one you typed, character for character.
-- [ ] Picking a look repaints the words **and** the background.
-- [ ] Type a phone number *after* picking a look → it takes that look, not white.
-- [ ] **Click a line on the poster while step 1 is open** → the inspector opens below the
-      steps and the accordion does not jump. *(The reported bug.)*
-- [ ] Drag a block; arrow keys nudge; Shift+arrow nudges further.
-- [ ] Focus ring and selection ring are distinguishable.
-- [ ] `Fine typography`: exact size % shows a mm equivalent; letter spacing and line
-      spacing change the preview; UPPERCASE changes Latin and leaves Malayalam alone.
-- [ ] Make a line overflow the trim → export is disabled, the warning is **above** the
-      buttons, and `Make it fit` clears it with an Undo toast.
-- [ ] A line too long even at the smallest size says so honestly rather than silently
-      failing.
-- [ ] `Remove` a line → a toast offers **Undo**, and Undo restores the words.
-- [ ] `PNG proof` and `Export SVG` both download.
-- [ ] Open the SVG: the text is real `<text>`, selectable, not paths.
-- [ ] Set a block to ML-TTKarthika → the SVG carries ASCII codes and the PNG still shows
-      readable Malayalam (the proof deliberately ignores export mode).
+- [ ] Load a member list → the **Which columns are names?** panel appears above the
+      Translate button, with `Name`, `House name`, `Place` and the like already ticked
+      and a product column left clear.
+- [ ] Each column shows its heading, its letter, how many cells, and a few real values.
+- [ ] Untick one and re-translate → those cells are translated again, not spelled out.
+- [ ] Translate with the columns ticked → name rows carry a **written by sound** badge,
+      no warnings, and were never sent to Claude.
+- [ ] **The heading row is translated, not spelled.** `Name` must read പേര്, not നമെ.
+      *(This is the one that looks right in a spot check and is wrong at the top of
+      every column the client reads first.)*
+- [ ] Read ten name rows against the English. They should be recognisable Malayalam.
+      Expect vowel length to be off — `Menon` comes out മെനൊൻ, not മേനോൻ — because
+      English spelling does not mark it. Fix one by hand and export.
+- [ ] Re-run the same sheet: the corrected name comes back from memory, badged
+      **from memory**, not re-spelled by the rule.
+
+### D2 · Word library *(ADR-032)*
+
+- [ ] **Read `data/dictionary/trade-en-ml.tsv` once, end to end.** ~90 lines. It is the
+      shop's own vocabulary and it overrides the general dictionary, so a wrong line
+      here prints wrong on every sheet. Anything wrong: fix the file, or override it in
+      the panel.
+- [ ] `Open` the panel → it says how many words are bundled (~59,000).
+- [ ] Search `standee` → one row, badged **Print trade**.
+- [ ] Search `coconut oil` → badged **Olam**, with other meanings listed beside it.
+- [ ] Change a Malayalam word and `Save` → the badge becomes **Yours** and the line
+      below shows what it replaced.
+- [ ] Re-translate a sheet using that word → the new wording is used, still free and
+      still offline.
+- [ ] `Download as Excel` opens in Excel with **readable Malayalam**, not boxes.
+- [ ] Load that file straight back unedited → it reports *nothing was changed* and
+      saves nothing. *(If it reports thousands of rows added, the diff is broken and
+      the library is now frozen at today's version.)*
+- [ ] Edit two rows in Excel, load it back → exactly two corrections reported.
+- [ ] Load a file with the columns **the wrong way round** → refused with a plain
+      message, and nothing is saved.
+
+## E · Poster designer *(ADR-034)*
+
+**Read this section before running it.** The app no longer sets the poster's
+type. Gemini draws every word into the picture, so nothing here can check the
+spelling and Malayalam will often be wrong. The check below is the only one
+there is, and it is yours.
+
+- [ ] With `data/poster_prompts/` empty of designs, the screen says where to put
+      them and shows the folder path. It does not look broken.
+- [ ] Drop a design file in → it appears in the list **without restarting the server**.
+- [ ] A design file with a typo in its header is skipped and the others still list.
+- [ ] Paste `main: … / h1: … / h2: …` → the three lines are read back correctly
+      **before** anything is spent. Check `h1` and `h2` are not swapped.
+- [ ] Paste an untagged first line → it is taken as `main`.
+- [ ] `Leaves this computer` shows on this screen. *(Every other screen in the app
+      is offline; this one never is, and that contrast is the point.)*
+- [ ] Press `Make the poster` with no reference picture → a poster comes back, and
+      the cost shown includes **both** calls, not just the picture.
+- [ ] Add a reference picture and generate again → it costs less, because the
+      visual-idea call is skipped.
+- [ ] **Read every word on the poster against the copy shown beside it.** Numbers,
+      the phone number, and any Malayalam. This is the step that replaces the
+      guarantee the app used to give for free (ADR-030 is superseded).
+- [ ] Type a change — "make the background darker" — and press `Change`. The poster
+      you were looking at is adjusted; it is not replaced by a fresh one.
+- [ ] Generate twice more, then click an earlier attempt → it comes back, and
+      nothing is charged for going back.
+- [ ] Turn the key off in Settings, press generate → a plain reason, **your copy
+      still in the box**, and no charge recorded.
+- [ ] `Download` saves the poster. Note its pixel size; it is whatever Google
+      returned, and there is no upscaling step.
 
 ## F · Settings
 
@@ -165,10 +213,10 @@ robustness · **P3** operator-visible polish · **P4** process.
 - [ ] API keys: a saved key shows only a 4-char hint; `Test` on the Gemini key reports
       OK / invalid / no internet; the spend meter says it is an estimate.
 - [ ] AI models: `Refresh from Google` lists models; a retired name is badged.
-- [ ] Poster styles: pick a look → the **preview card** repaints; hex field accepts a
-      pasted brand colour; the contrast readout gives a number **and** words.
-- [ ] Prompt library: edit, `Save`, `Use this one`, `Restore default`.
-- [ ] The `poster-copy` scope is listed and restorable.
+- [ ] Prompt library: it **opens on a real scope**, not an empty panel. Edit, `Save`,
+      `Use this one`, `Restore default`.
+- [ ] The `poster-concept` scope is listed and restorable. *(Poster designs are files
+      now, not a settings screen — see `data/poster_prompts/`.)*
 
 ## G · Both themes
 

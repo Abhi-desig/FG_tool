@@ -6,10 +6,10 @@ gets nowhere — because nothing on this machine was ever wrong. This checks the
 two halves separately and says which one is at fault:
 
 **Part A — the machinery.** Google is stubbed out, so no network and no money.
-It exercises the whole path anyway: build the prompt, parse an image, parse a
-fenced JSON layout, put the operator's wording back if the AI altered it, price
-the job, and record a refusal as free rather than as spend. If this fails, the
-install is broken and the key is irrelevant.
+It exercises the whole path anyway: read the shop's poster designs off disk,
+fill one from tagged copy, turn a reply into a picture, apply a change to that
+picture, price both, and record a refusal as free rather than as spend. If this
+fails, the install is broken and the key is irrelevant.
 
 **Part B — the key.** One free call (`models.list` costs nothing and spends no
 tokens). If A passed and B failed, the code is fine and the key needs attention
@@ -34,19 +34,9 @@ BAR = "=" * 74
 # only needs bytes to carry through.
 STUB_IMAGE = b"\x89PNG\r\n\x1a\n" + b"stub-image-bytes" * 48
 
-# The stub returns the wrong phone number on purpose. Putting the operator's
-# own wording back is the guarantee the poster feature rests on, so a check
-# that never sees it get corrected has not checked the thing that matters.
-REAL_PHONE = "9876543210"
-ALTERED_PHONE = "9999999999"
-
-STUB_LAYOUT = f"""```json
-{{"blocks": [
-  {{"id": "headline", "text": "ONAM SALE", "x": 10, "y": 12, "size": 72}},
-  {{"id": "offer",    "text": "40% OFF",   "x": 10, "y": 40, "size": 48}},
-  {{"id": "phone",    "text": "{ALTERED_PHONE}", "x": 10, "y": 80, "size": 24}}
-]}}
-```"""
+# The copy the stub poster is built from. Tagged the way the operator writes it,
+# because reading those tags is the first thing that has to work.
+STUB_COPY = "main: ONAM SALE\nh1: 40% off\nh2: Only this week"
 
 
 # --- standing in for Google ------------------------------------------------
@@ -93,82 +83,78 @@ class _StubClient:
 
 def _check_machinery() -> list[tuple[bool, str]]:
     """Exercise every step of the call path with Google stubbed out."""
-    from backend.features import ai, prompts
+    from backend.features import ai, posters, prompts
 
     prompts.seed_defaults()
     results: list[tuple[bool, str]] = []
     original = ai._client  # noqa: SLF001 - restored in the finally below
 
+    # 1. The shop's own designs, read off disk. No network, no key, no model —
+    # and if this is empty the poster screen has nothing to offer at all.
+    designs = posters.designs()
+    results.append(
+        (
+            bool(designs),
+            f"designs: {len(designs)} in {posters.DESIGNS_DIR}"
+            + (" — the folder is empty" if not designs else ""),
+        )
+    )
+
+    # 2. Tagged copy is read into exactly the three lines a design can use.
+    copy = posters.parse_copy(STUB_COPY)
+    results.append(
+        (
+            copy.get("main") == "ONAM SALE" and set(copy) == {"main", "h1", "h2"},
+            f"copy: read {', '.join(f'{k}={v!r}' for k, v in copy.items())}",
+        )
+    )
+
+    # 3. A design fills from that copy, and nothing is left unresolved. A
+    # `{{placeholder}}` reaching Google would spend money on a confused request.
+    if designs:
+        built = posters.prompt_for(designs[0].key, copy, concept="a warm courtyard")
+        results.append(
+            (
+                "ONAM SALE" in built and "{{" not in built,
+                f"prompt: {len(built)} chars from “{designs[0].name}”, "
+                f"copy present, no placeholder left",
+            )
+        )
+
     try:
-        # 1. An image comes back, is priced, and carries the watermark notice.
+        # 4. A reply carrying an image becomes a poster, priced and disclosed.
         ai._client = lambda: _StubClient(_Response([_Part(data=STUB_IMAGE)]))  # noqa: SLF001
-        art = ai.generate_artwork(
-            {
-                "headline": "ONAM SALE",
-                "offer": "40% OFF",
-                "phone": REAL_PHONE,
-                "subject": "festive marigold background",
-                "occasion": "Onam",
-                "idea": "",
-                "style": "",
-                "palette": "",
-                "aspect": "",
-            },
+        made = ai.generate_poster(
+            design_key=designs[0].key if designs else "none",
+            copy=copy,
+            concept="a warm courtyard at dusk",
             batch=True,
         )
         results.append(
             (
-                art.ok and art.image is not None,
-                f"artwork: {len(art.image or b'')} bytes back, "
-                f"Rs {art.cost_paise / 100:.2f} charged, "
-                f"{len(art.warnings)} warning(s)",
+                made.ok and made.image is not None,
+                f"poster: {len(made.image or b'')} bytes back, "
+                f"Rs {made.cost_paise / 100:.2f} charged, "
+                f"{len(made.warnings)} warning(s)",
             )
         )
 
-        # 2. A fenced JSON layout parses, and the altered phone number is repaired.
-        ai._client = lambda: _StubClient(  # noqa: SLF001
-            _Response([_Part(text=STUB_LAYOUT)], text=STUB_LAYOUT)
-        )
-        lay = ai.plan_layout(
-            {
-                "headline": "ONAM SALE",
-                "offer": "40% OFF",
-                "phone": REAL_PHONE,
-                "occasion": "Onam",
-                "tone": "festive",
-            }
-        )
-        blocks = (lay.layout or {}).get("blocks", [])
-        ids = [b.get("id") for b in blocks]
-        phone = next((b for b in blocks if b.get("id") == "phone"), {})
-        # The stub returns three blocks and omits `occasion`, which the repair
-        # puts back — so four. `tone` is a styling hint, not copy, and must never
-        # become text on the poster: an early version of that repair would have
-        # printed the word "festive" on a client's poster.
+        # 5. A change is applied to that poster — the image goes back up with
+        # the note, which is what makes "change this one" different from
+        # "start again".
+        changed = ai.refine_poster(STUB_IMAGE, "image/png", "make it darker")
         results.append(
             (
-                lay.ok and sorted(ids) == ["headline", "occasion", "offer", "phone"],
-                f"layout: {len(blocks)} blocks — {', '.join(str(i) for i in sorted(ids))}",
-            )
-        )
-        results.append(
-            (
-                "occasion" in ids,
-                "dropped line restored: the AI omitted 'occasion', it is back",
-            )
-        )
-        results.append(
-            (
-                phone.get("text") == REAL_PHONE and bool(lay.warnings),
-                f"text guard: AI said {ALTERED_PHONE}, poster will print "
-                f"{phone.get('text', '(nothing)')}",
+                changed.ok and changed.image is not None,
+                f"change: applied to the poster sent, "
+                f"Rs {changed.cost_paise / 100:.2f} charged",
             )
         )
 
-        # 3. A refusal costs nothing and keeps the operator's work.
+        # 6. A refusal costs nothing and keeps the operator's work.
         ai._client = lambda: _StubClient(raises=RuntimeError("503 model overloaded"))  # noqa: SLF001
-        bad = ai.plan_layout(
-            {"headline": "ONAM SALE", "offer": "", "phone": "", "occasion": "", "tone": ""}
+        bad = ai.generate_poster(
+            design_key=designs[0].key if designs else "none", copy=copy, batch=True
         )
         results.append(
             (

@@ -1,7 +1,7 @@
 """SQLite storage. Stdlib `sqlite3`, no ORM — see ADR-009.
 
 The full schema is here — `preferences`, `clients`, `glossary`, `corrections`,
-`api_keys`, `prompts`, `prompt_versions`, `poster_styles` and `ai_spend`. The tables are
+`api_keys`, `prompts`, `prompt_versions` and `ai_spend`. The tables are
 created together in `init()` rather than per phase: an empty table costs nothing,
 and the alternative was a migration step on a machine with no one to run it.
 
@@ -93,6 +93,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS corrections_scoped
     ON corrections(client_id, source_norm) WHERE client_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS corrections_job ON corrections(learned_from);
 
+-- The operator's corrections to the bundled word library (ADR-032).
+--
+-- Shop-wide only, with no `client_id`. The library is a dictionary, not a
+-- client's terminology: if the shop decides `standee` is സ്റ്റാൻഡി, that is
+-- true on every sheet, and a per-client version of it already exists in
+-- `glossary` for the cases where a client genuinely wants something else.
+--
+-- Stored as a diff rather than a copy of the whole dictionary, so a refreshed
+-- `data/dictionary/en-ml.tsv.gz` brings 59,000 new answers without discarding
+-- the handful the operator has fixed.
+CREATE TABLE IF NOT EXISTS dictionary_overrides (
+    id          INTEGER PRIMARY KEY,
+    source      TEXT NOT NULL,
+    -- Matched through backend/textkey.py, the same normalisation the library
+    -- and the corrections memory use. All three must agree or an override
+    -- silently stops applying.
+    source_norm TEXT NOT NULL UNIQUE,
+    target      TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
 -- Ciphertext only. The plaintext key never lands in this file, and never
 -- crosses the API boundary to the browser (SECURITY.md).
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -126,23 +147,11 @@ CREATE TABLE IF NOT EXISTS prompt_versions (
     saved_at  TEXT NOT NULL
 );
 
--- A named poster look: the fixed prompt structure that makes it, and how the
--- words are styled when it is chosen. The two travel together because half a
--- style is not a style. `key` is the stable handle, so renaming one in Settings
--- does not orphan the posters that used it.
-CREATE TABLE IF NOT EXISTS poster_styles (
-    id            INTEGER PRIMARY KEY,
-    key           TEXT NOT NULL UNIQUE,
-    name          TEXT NOT NULL,
-    description   TEXT NOT NULL DEFAULT '',
-    body          TEXT NOT NULL,
-    palette       TEXT NOT NULL DEFAULT '',
-    swatches      TEXT NOT NULL DEFAULT '[]',
-    text_defaults TEXT NOT NULL DEFAULT '{}',
-    is_default    INTEGER NOT NULL DEFAULT 0,
-    sort_order    INTEGER NOT NULL DEFAULT 0,
-    updated_at    TEXT NOT NULL
-);
+-- `poster_styles` used to sit here. Design styles are files now, under
+-- `data/poster_prompts/` (ADR-034), so nothing writes this table any more.
+-- It is dropped from the schema rather than from the database: an existing
+-- data.db keeps its rows, because deleting the shop's saved styles to tidy up a
+-- CREATE statement would be a poor trade.
 
 -- Money. Recorded in paise so the arithmetic is exact — floats and currency
 -- are a bad pairing and this total is compared against Google's console.
@@ -542,6 +551,88 @@ def forget_job(job_id: str) -> int:
     with cursor() as cur:
         cur.execute("DELETE FROM corrections WHERE learned_from = ?", (job_id,))
         return cur.rowcount
+
+
+# --- word library overrides ------------------------------------------------
+
+
+def dictionary_overrides() -> dict[str, str]:
+    """The operator's corrections to the bundled library, keyed for lookup.
+
+    Same shape and same hot-path reasoning as `corrections_map`: read once per
+    sheet, then consulted per cell.
+    """
+    with cursor() as cur:
+        rows = cur.execute("SELECT source_norm, target FROM dictionary_overrides")
+        return {r["source_norm"]: r["target"] for r in rows}
+
+
+def list_dictionary_overrides() -> list[dict[str, object]]:
+    """Every override, newest first, for the Word library panel."""
+    with cursor() as cur:
+        rows = cur.execute(
+            "SELECT id, source, source_norm, target, updated_at "
+            "FROM dictionary_overrides ORDER BY updated_at DESC, source"
+        )
+        return [dict(r) for r in rows]
+
+
+def upsert_dictionary_overrides(pairs: list[tuple[str, str]]) -> dict[str, int]:
+    """Save these corrections, reporting what actually changed.
+
+    Unusable pairs are skipped rather than raised, for the reason
+    `upsert_corrections` gives: this runs over a whole imported spreadsheet, and
+    one blank row must not cost the operator the import.
+    """
+    clean: dict[str, tuple[str, str]] = {}
+    skipped = 0
+    for source, target in pairs:
+        source = (source or "").strip()
+        target = (target or "").strip()
+        norm = textkey.normalise(source)
+        if (
+            not source
+            or not target
+            or not norm
+            or len(source) > MAX_CORRECTION_CHARS
+            or len(target) > MAX_CORRECTION_CHARS
+            or not textkey.has_latin(source)
+        ):
+            skipped += 1
+            continue
+        clean[norm] = (source, target)
+
+    if not clean:
+        return {"added": 0, "updated": 0, "skipped": skipped}
+
+    with cursor() as cur:
+        # Counted before writing, because `rowcount` cannot tell an insert from
+        # an update in an upsert.
+        existing = {
+            r["source_norm"]
+            for r in cur.execute("SELECT source_norm FROM dictionary_overrides")
+            if r["source_norm"] in clean
+        }
+        now = _now()
+        cur.executemany(
+            "INSERT INTO dictionary_overrides(source, source_norm, target, updated_at) "
+            "VALUES(?, ?, ?, ?) "
+            "ON CONFLICT(source_norm) DO UPDATE SET "
+            "  source = excluded.source, target = excluded.target, "
+            "  updated_at = excluded.updated_at",
+            [(source, norm, target, now) for norm, (source, target) in clean.items()],
+        )
+    return {
+        "added": len(clean) - len(existing),
+        "updated": len(existing),
+        "skipped": skipped,
+    }
+
+
+def delete_dictionary_override(override_id: int) -> None:
+    """Drop one override, putting the bundled answer back in force."""
+    with cursor() as cur:
+        cur.execute("DELETE FROM dictionary_overrides WHERE id = ?", (override_id,))
 
 # --- API keys --------------------------------------------------------------
 

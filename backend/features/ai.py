@@ -19,7 +19,6 @@ than as spend.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -27,11 +26,22 @@ from typing import Any, Literal
 
 from backend import db
 from backend.budget import MONTHLY_BUDGET_PAISE, OverBudget, budget_status, ensure_within
-from backend.features import prompts, styles
+from backend.features import posters, prompts
 
 log = logging.getLogger(__name__)
 
-Feature = Literal["photo-edit", "poster-artwork", "poster-layout", "poster-copy"]
+# The three retired names — `poster-artwork`, `poster-layout`, `poster-copy` —
+# stay valid here on purpose. They are gone from ROLES, but `ai_spend` holds real
+# rows recorded under them and the Settings spend view still has to render the
+# shop's own history (ADR-034).
+Feature = Literal[
+    "photo-edit",
+    "poster",
+    "poster-concept",
+    "poster-artwork",
+    "poster-layout",
+    "poster-copy",
+]
 
 # --- which model does which job -------------------------------------------
 #
@@ -44,9 +54,8 @@ Feature = Literal["photo-edit", "poster-artwork", "poster-layout", "poster-copy"
 # change when Google moves.
 
 PHOTO_MODEL = "gemini-2.5-flash-image"
-ARTWORK_MODEL = "gemini-2.5-flash-image"
-LAYOUT_MODEL = "gemini-2.5-flash"
-COPY_MODEL = "gemini-2.5-flash"
+POSTER_MODEL = "gemini-2.5-flash-image"
+CONCEPT_MODEL = "gemini-2.5-flash"
 
 
 @dataclass(frozen=True)
@@ -70,12 +79,12 @@ class Role:
 
 ROLES: tuple[Role, ...] = (
     Role(
-        key="artwork",
-        feature="poster-artwork",
-        label="Poster artwork",
-        description="Draws the picture behind the poster. Never any words in it.",
+        key="poster",
+        feature="poster",
+        label="Poster",
+        description="Draws the whole poster, words and all, from your design.",
         needs_image=True,
-        default=ARTWORK_MODEL,
+        default=POSTER_MODEL,
         fallbacks=(
             "gemini-2.5-flash-image",
             "gemini-3-pro-image-preview",
@@ -95,12 +104,15 @@ ROLES: tuple[Role, ...] = (
         rate_paise=400,  # ~₹4
     ),
     Role(
-        key="layout",
-        feature="poster-layout",
-        label="Layout planning",
-        description="Text only — asks where the words should go. Costs almost nothing.",
+        key="concept",
+        feature="poster-concept",
+        label="Poster visual idea",
+        description=(
+            "Text only — reads the poster's words and describes the picture "
+            "they should sit on. Costs almost nothing."
+        ),
         needs_image=False,
-        default=LAYOUT_MODEL,
+        default=CONCEPT_MODEL,
         fallbacks=(
             "gemini-2.5-flash",
             "gemini-flash-latest",
@@ -108,24 +120,6 @@ ROLES: tuple[Role, ...] = (
             "gemini-2.0-flash",
         ),
         rate_paise=5,  # negligible, but not free
-    ),
-    Role(
-        key="copy",
-        feature="poster-copy",
-        label="Poster wording",
-        description=(
-            "Writes the poster's words from a brief, in English and Malayalam. "
-            "Never draws anything."
-        ),
-        needs_image=False,
-        default=COPY_MODEL,
-        # Deliberately no `-lite` here, unlike layout planning: this one has to
-        # produce correct Malayalam orthography, and dropping to a lighter model
-        # to save five paise is a bad trade on work the shop prints.
-        fallbacks=("gemini-2.5-flash", "gemini-flash-latest", "gemini-2.5-pro"),
-        rate_paise=10,  # ~2x a layout plan: same tiny input, four times the output
-        # No batch rate: `has_batch_discount` then returns False and the batch
-        # toggle stays hidden with no extra UI code.
     ),
 )
 
@@ -656,65 +650,38 @@ def edit_photo(
     return _record(result)
 
 
-# --- poster artwork -------------------------------------------------------
+# --- posters ---------------------------------------------------------------
+#
+# Gemini draws the whole poster, words included, from one of the operator's own
+# designs in `data/poster_prompts/`. ADR-034 records what that trades away: the
+# words are no longer set by this app, so Malayalam in the image will be
+# misspelled and nothing in the result is editable. Neither is checkable from
+# here — both are said plainly in the UI instead.
 
 
-def artwork_prompt(values: dict[str, str], style_key: str | None = None) -> str:
-    """The exact words that will be sent, without sending them.
+def poster_concept(copy: dict[str, str], over_budget_ok: bool = False) -> AiResult:
+    """Turn the poster's words into a visual idea, in text.
 
-    Free, so the designer can show the operator the finished prompt before
-    anything is spent — the style owns the structure, the operator owns the
-    copy, and neither should have to take the other on trust.
+    Runs only when the operator gave no reference image. A picture they chose
+    themselves is a better brief than anything this can write, and paying for
+    both would be paying twice to be told something less useful.
     """
-    if style_key:
-        return styles.build_prompt(styles.by_key(style_key), values)
-    template = prompts.active_prompt("poster-artwork")
-    return prompts.render(template["body"], values)
-
-
-def generate_artwork(
-    values: dict[str, str],
-    batch: bool = True,
-    style_key: str | None = None,
-    over_budget_ok: bool = False,
-) -> AiResult:
-    """Make a background picture. Never any words in it — the app draws those.
-
-    With a style, the picture is generated *from the poster's own copy* through
-    that style's fixed prompt structure. Without one, this falls back to the
-    prompt library's free-form `poster-artwork` template, which is still how the
-    photo-edit screen and any older saved job reach it.
-    """
-    model = model_for("artwork")
-    try:
-        text = artwork_prompt(values, style_key)
-    except (db.NotFound, styles.StyleError) as exc:
-        return AiResult(
-            ok=False,
-            feature="poster-artwork",
-            model=model,
-            batch=batch,
-            error=f"That design style is not usable: {exc}",
-        )
-
+    template = prompts.active_prompt("poster-concept")
+    text = prompts.render(template["body"], dict(copy))
+    model = model_for("concept")
     result = AiResult(
         ok=False,
-        feature="poster-artwork",
+        feature="poster-concept",
         model=model,
-        batch=batch,
+        batch=False,
         prompt_used=text,
     )
-    # A style poster is described by its headline; a free-form one by a subject.
-    if not (values.get("subject") or values.get("headline") or "").strip():
-        result.error = (
-            "Write the poster's headline first — the picture is made from it."
-            if style_key
-            else "Say what the picture should be of."
-        )
+    if not (copy.get("main") or "").strip():
+        result.error = "Write the poster's headline first — the idea comes from it."
         return result
 
     try:
-        check_budget("poster-artwork", batch, over_budget_ok)
+        check_budget("poster-concept", False, over_budget_ok)
     except OverBudget as exc:
         result.error = str(exc)
         return result
@@ -724,15 +691,132 @@ def generate_artwork(
     except AiError as exc:
         result.error = str(exc)
         return result
-    except Exception as exc:  # noqa: BLE001
-        log.warning("artwork generation failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - the SDK raises many types
+        log.warning("poster concept failed: %s", exc)
+        result.error = _friendly(exc)
+        return _record(result)
+
+    idea = _extract_text(response).strip()
+    if not idea:
+        result.error = "Google returned a reply with no visual idea in it."
+        return _record(result)
+
+    result.ok = True
+    result.text = idea
+    result.cost_paise = cost_of("concept", False)
+    return _record(result)
+
+
+def generate_poster(
+    design_key: str,
+    copy: dict[str, str],
+    concept: str = "",
+    reference: tuple[bytes, str] | None = None,
+    batch: bool = True,
+    over_budget_ok: bool = False,
+) -> AiResult:
+    """Draw the poster. One design, the copy, and either a concept or a picture."""
+    model = model_for("poster")
+    result = AiResult(ok=False, feature="poster", model=model, batch=batch)
+
+    try:
+        text = posters.prompt_for(design_key, copy, concept)
+    except posters.PosterError as exc:
+        result.error = str(exc)
+        return result
+
+    result.prompt_used = text
+
+    if not (copy.get("main") or "").strip():
+        result.error = "Write the poster's headline first — there is nothing to set."
+        return result
+
+    try:
+        check_budget("poster", batch, over_budget_ok)
+    except OverBudget as exc:
+        result.error = str(exc)
+        return result
+
+    contents: list[Any] = [text]
+    if reference is not None:
+        from google.genai import types
+
+        data, media_type = reference
+        # Ahead of the prompt, matching `edit_photo`: the picture is the brief,
+        # and the words that follow say what to do with it.
+        contents = [types.Part.from_bytes(data=data, mime_type=media_type), text]
+
+    return _draw(result, model, contents, "poster", batch)
+
+
+def refine_poster(
+    image: bytes,
+    media_type: str,
+    note: str,
+    batch: bool = False,
+    over_budget_ok: bool = False,
+) -> AiResult:
+    """Change the poster that was just made, keeping the rest of it.
+
+    The previous poster goes back with the operator's note, so a design they
+    nearly liked is adjusted rather than replaced. Not batched by default:
+    this is the iterating step, and waiting minutes between attempts is what
+    stops an operator iterating at all.
+    """
+    model = model_for("poster")
+    result = AiResult(ok=False, feature="poster", model=model, batch=batch)
+
+    if not note.strip():
+        result.error = "Say what should change about the poster."
+        return result
+
+    try:
+        check_budget("poster", batch, over_budget_ok)
+    except OverBudget as exc:
+        result.error = str(exc)
+        return result
+
+    instruction = (
+        "Change this poster as described, and change nothing else.\n"
+        "\n"
+        f"Change: {note.strip()}\n"
+        "\n"
+        "Keep the layout, the colours and every word exactly as they are unless "
+        "the change asks otherwise. Do not add any word, number, price, date or "
+        "phone number that is not already on the poster."
+    )
+    result.prompt_used = instruction
+
+    from google.genai import types
+
+    contents = [types.Part.from_bytes(data=image, mime_type=media_type), instruction]
+    return _draw(result, model, contents, "poster", batch)
+
+
+def _draw(
+    result: AiResult, model: str, contents: list[Any], role: str, batch: bool
+) -> AiResult:
+    """Send a drawing request and unpack the picture.
+
+    Shared by generating and refining because the failure handling is the part
+    that matters and it must not drift between them: a refusal is a 200 with a
+    plain reason (ADR-023), and a reply with no image is reported as possibly
+    billed rather than assumed free.
+    """
+    try:
+        response = _client().models.generate_content(model=model, contents=contents)
+    except AiError as exc:
+        result.error = str(exc)
+        return result
+    except Exception as exc:  # noqa: BLE001 - the SDK raises many types
+        log.warning("poster generation failed: %s", exc)
         result.error = _friendly(exc)
         return _record(result)
 
     data, mime = _extract_image(response)
     if data is None:
         result.error = (
-            "Google returned a reply but no image. This may still have been "
+            "Google returned a reply but no poster. This may still have been "
             "billed — the app cannot know. Check Google's console before "
             "assuming it was free."
         )
@@ -741,366 +825,11 @@ def generate_artwork(
     result.ok = True
     result.image = data
     result.media_type = mime
-    result.cost_paise = cost_of("artwork", batch)
+    result.cost_paise = cost_of(role, batch)
     result.warnings.append(
         "Google embeds an invisible SynthID watermark in AI images. It does not "
         "affect printing."
     )
-    return _record(result)
-
-
-# --- layout planning ------------------------------------------------------
-
-_FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.MULTILINE)
-
-
-def parse_layout(text: str) -> dict[str, Any]:
-    """Read the AI's layout plan, tolerating a code fence around it.
-
-    Raises rather than guessing: a half-understood layout that silently drops a
-    phone number is worse than an error the operator can see.
-    """
-    cleaned = _FENCE.sub("", text).strip()
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start == -1 or end <= start:
-        raise AiError("The AI did not return a layout plan.")
-    try:
-        parsed = json.loads(cleaned[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise AiError(f"The layout plan was not valid JSON: {exc.msg}") from exc
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("blocks"), list):
-        raise AiError("The layout plan had no blocks.")
-    return parsed
-
-
-def plan_layout(values: dict[str, str], over_budget_ok: bool = False) -> AiResult:
-    """Ask where the words should go. **Data only — never pixels with text.**
-
-    This is the constraint the whole poster feature rests on: the AI chooses
-    positions, the app draws the text. Malayalam is correct because it never
-    touches the model.
-    """
-    template = prompts.active_prompt("poster-layout")
-    text = prompts.render(template["body"], values)
-    model = model_for("layout")
-    result = AiResult(
-        ok=False,
-        feature="poster-layout",
-        model=model,
-        batch=False,
-        prompt_used=text,
-    )
-    if not values.get("headline", "").strip():
-        result.error = "A poster needs a headline to lay out."
-        return result
-
-    try:
-        check_budget("poster-layout", False, over_budget_ok)
-    except OverBudget as exc:
-        result.error = str(exc)
-        return result
-
-    try:
-        response = _client().models.generate_content(model=model, contents=text)
-    except AiError as exc:
-        result.error = str(exc)
-        return result
-    except Exception as exc:  # noqa: BLE001
-        log.warning("layout planning failed: %s", exc)
-        result.error = _friendly(exc)
-        return _record(result)
-
-    try:
-        layout = parse_layout(_extract_text(response))
-    except AiError as exc:
-        result.error = str(exc)
-        return _record(result)
-
-    result.ok = True
-    result.layout = layout
-    result.cost_paise = cost_of("layout", False)
-    verified, notes = verify_text_unchanged(layout, values)
-    result.layout = verified
-    result.warnings.extend(notes)
-    return _record(result)
-
-
-# Where a re-inserted block goes when the model dropped it entirely. Matches the
-# designer's own opening layout, so a recovered line lands somewhere sensible
-# rather than on top of another one.
-#
-# **This is also the list of fields that may become text on the poster**, and
-# that is load-bearing. `plan_layout` is given `tone` too — a styling hint like
-# "festive" — and a first version of the dropped-block repair re-inserted every
-# non-empty input value, which would have printed the word "festive" on a
-# client's poster. Caught by running the shipped self-check.
-_FALLBACK_PLACEMENT: dict[str, dict[str, Any]] = {
-    "occasion": {"y": 0.10, "size": "medium"},
-    "headline": {"y": 0.22, "size": "large"},
-    "offer": {"y": 0.45, "size": "huge"},
-    "phone": {"y": 0.86, "size": "small"},
-}
-
-
-# A run of digits, with the punctuation that belongs inside one: 40%, 9847
-# 000 000, 23/07/2026, ₹1,499.
-_DIGIT_RUN = re.compile(r"\d[\d\s.,/%₹:-]*\d|\d")
-
-# U+0D00–U+0D7F. `features/verify.py` keeps its own copy for the same purpose;
-# feature modules may not import each other, and one regex is not worth a
-# third home in `config.py`.
-_MALAYALAM = re.compile(r"[ഀ-ൿ]")
-
-
-def _digit_runs(text: str) -> set[str]:
-    """Every number-like run in a string, normalised to its digits alone.
-
-    Compared on digits so "9847 000 000" and "9847000000" are the same number
-    and a reformatting is not reported as a fabrication.
-    """
-    return {
-        "".join(ch for ch in run if ch.isdigit())
-        for run in _DIGIT_RUN.findall(text)
-        if any(ch.isdigit() for ch in run)
-    }
-
-
-def verify_text_unchanged(
-    layout: dict[str, Any],
-    values: dict[str, str],
-    *,
-    allowed_digits: str = "",
-) -> tuple[dict[str, Any], list[str]]:
-    """Put the operator's exact words back if the AI altered *or dropped* them.
-
-    The model is asked to copy text verbatim, and it mostly does. Mostly is not
-    good enough for a phone number or a Malayalam headline, so anything that came
-    back changed is replaced with what was typed and the row is flagged.
-
-    **Dropping is checked too, and used not to be.** This only ever repaired
-    blocks that came back, so a layout that omitted the phone number — or
-    returned it under a different `id` — passed silently: the exact failure the
-    docstring claimed to prevent (NEXT.md 1.2). Every non-empty input field must
-    now appear in the result, or it is re-inserted and said out loud.
-
-    `allowed_digits` turns on a second rule, used only where the model is
-    *writing* text rather than placing it: any number in a block the model
-    authored must appear in the text the operator typed. A fabricated
-    percentage or phone number on a printed poster is a reprint, and this repo
-    has already measured the same failure class in translation — ADR-028
-    records the offline model inventing a "retrieved on June 2, 2019" citation
-    into a member's address.
-
-    Left empty — the layout path — the behaviour is exactly as it always was.
-    """
-    notes: list[str] = []
-    permitted = _digit_runs(allowed_digits) if allowed_digits else None
-    blocks = layout.get("blocks")
-    if not isinstance(blocks, list):
-        # No usable blocks at all: rebuild from what was typed rather than
-        # handing back a layout with none of the operator's words in it.
-        rebuilt = [
-            {"id": key, "text": values[key].strip(), **placement}
-            for key, placement in _FALLBACK_PLACEMENT.items()
-            if values.get(key, "").strip()
-        ]
-        if rebuilt:
-            notes.append(
-                "The AI returned no usable blocks — your lines were laid out with "
-                "the standard placement instead. Move them as you like."
-            )
-            return layout | {"blocks": rebuilt}, notes
-        return layout, notes
-
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        key = str(block.get("id", ""))
-        original = values.get(key)
-        if original is None or not original.strip():
-            if permitted is not None:
-                # Text the model wrote itself. Any figure in it has to have come
-                # from the operator; the caller decides what to do about one
-                # that did not.
-                invented = _digit_runs(str(block.get("text", ""))) - permitted
-                if invented:
-                    block["fabricated"] = sorted(invented)[0]
-            continue
-        if str(block.get("text", "")).strip() != original.strip():
-            notes.append(
-                f"The AI changed the {key} text — your wording was put back."
-            )
-            block["text"] = original
-
-    # Anything the model never returned. Re-inserted rather than lost: losing a
-    # line of the client's wording is exactly the invisible error this shop
-    # cannot afford, and it is the one this function exists to stop.
-    #
-    # Only the copy roles in `_FALLBACK_PLACEMENT` are eligible — see the note
-    # there. A field that is not poster copy must never become text on a poster.
-    returned = {
-        str(b.get("id", "")) for b in blocks if isinstance(b, dict)
-    }
-    for key, placement in _FALLBACK_PLACEMENT.items():
-        text = values.get(key, "")
-        if not text or not text.strip() or key in returned:
-            continue
-        blocks.append({"id": key, "text": text.strip(), **placement})
-        notes.append(
-            f"The AI left out the {key} line — it was added back at the standard "
-            f"position. Check where it sits."
-        )
-
-    return layout, notes
-
-
-# --- writing the words ------------------------------------------------------
-#
-# ADR-030. The operator gives a brief; the model returns whole alternative sets
-# of poster copy in English and Malayalam; the app still draws every word. The
-# `_NO_LETTERING` rule on every style body is untouched — this role cannot
-# return an image at all (`needs_image=False`).
-
-
-def copy_prompt(values: dict[str, str]) -> str:
-    """Exactly what would be sent. Free and side-effect free, like `artwork_prompt`."""
-    template = prompts.active_prompt("poster-copy")
-    return prompts.render(template["body"], values)
-
-
-def parse_copy(text: str) -> dict[str, Any]:
-    """Read the alternatives, tolerating a code fence. Raises rather than guessing."""
-    cleaned = _FENCE.sub("", text).strip()
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start == -1 or end <= start:
-        raise AiError("The AI did not return any wording.")
-    try:
-        parsed = json.loads(cleaned[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise AiError(f"The wording was not valid JSON: {exc.msg}") from exc
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("alternatives"), list):
-        raise AiError("The AI returned no alternatives.")
-    return parsed
-
-
-def _blocks_ok(blocks: Any) -> bool:
-    return isinstance(blocks, list) and all(isinstance(b, dict) for b in blocks)
-
-
-def write_copy(
-    values: dict[str, str],
-    locked: dict[str, str] | None = None,
-    over_budget_ok: bool = False,
-) -> AiResult:
-    """Write several sets of poster words. Never raises past the caller.
-
-    `locked` are lines the operator has committed to and asked to keep; they are
-    checked on return and put back if the model rewrote or dropped them, reusing
-    the same guard the layout path uses.
-
-    An alternative containing a figure the operator never typed is **dropped**,
-    not repaired: there is no safe way to guess which number was meant, and two
-    good alternatives are a usable screen while one invented "60% OFF" is a
-    reprint.
-    """
-    locked = locked or {}
-    text = copy_prompt(values)
-    model = model_for("copy")
-    result = AiResult(
-        ok=False, feature="poster-copy", model=model, batch=False, prompt_used=text
-    )
-    if not values.get("brief", "").strip():
-        result.error = "Say what the poster is for, and the AI can write it."
-        return result
-
-    try:
-        check_budget("poster-copy", False, over_budget_ok)
-    except OverBudget as exc:
-        result.error = str(exc)
-        return result
-
-    try:
-        response = _client().models.generate_content(model=model, contents=text)
-    except AiError as exc:
-        result.error = str(exc)
-        return result
-    except Exception as exc:  # noqa: BLE001
-        log.warning("copywriting failed: %s", exc)
-        result.error = _friendly(exc)
-        return _record(result)
-
-    try:
-        parsed = parse_copy(_extract_text(response))
-    except AiError as exc:
-        result.error = str(exc)
-        return _record(result)
-
-    # Every digit the operator actually typed. Anything else in the model's own
-    # wording is an invention.
-    allowed = " ".join([*values.values(), *locked.values()])
-
-    kept: list[dict[str, Any]] = []
-    notes: list[str] = []
-    for index, alt in enumerate(parsed["alternatives"]):
-        if not isinstance(alt, dict):
-            continue
-        english, malayalam = alt.get("blocks"), alt.get("blocks_ml")
-        if not _blocks_ok(english) or not _blocks_ok(malayalam):
-            continue
-
-        label = str(alt.get("label") or f"Option {index + 1}")
-        english, english_notes = verify_text_unchanged(
-            {"blocks": english}, locked, allowed_digits=allowed
-        )
-        malayalam, malayalam_notes = verify_text_unchanged(
-            {"blocks": malayalam}, locked, allowed_digits=allowed
-        )
-
-        invented = next(
-            (
-                b["fabricated"]
-                for b in [*english["blocks"], *malayalam["blocks"]]
-                if isinstance(b, dict) and b.get("fabricated")
-            ),
-            None,
-        )
-        if invented:
-            notes.append(
-                f"“{label}” was dropped: it invented the figure {invented}, which "
-                "you never typed."
-            )
-            continue
-
-        # Malayalam that is not in Malayalam script is transliteration, and
-        # transliterated Malayalam on a printed poster reads as a mistake.
-        if not any(_MALAYALAM.search(str(b.get("text", ""))) for b in malayalam["blocks"]):
-            notes.append(f"“{label}” was dropped: its Malayalam came back in the wrong script.")
-            continue
-
-        notes.extend(english_notes)
-        notes.extend(malayalam_notes)
-        kept.append(
-            {
-                "id": str(alt.get("id") or f"a{index + 1}"),
-                "label": label,
-                "blocks": english["blocks"],
-                "blocks_ml": malayalam["blocks"],
-            }
-        )
-
-    result.cost_paise = cost_of("copy", False)
-    result.warnings.extend(notes)
-    if not kept:
-        # A refusal, not a silent empty list. The money is gone either way, so
-        # the spend is still recorded — ADR-023 and ADR-024.
-        result.error = (
-            "None of the wording the AI returned was usable. Your own words are "
-            "untouched — try again, or add more detail to the brief."
-        )
-        return _record(result)
-
-    result.ok = True
-    result.alternatives = kept
     return _record(result)
 
 
@@ -1112,7 +841,7 @@ def write_copy(
 # verifier; the shop has one AI budget, not one per provider.
 
 __all__ = [
-    "COPY_MODEL",
+    "POSTER_MODEL",
     "MONTHLY_BUDGET_PAISE",
     "AiError",
     "AiResult",

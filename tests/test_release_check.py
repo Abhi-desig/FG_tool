@@ -91,7 +91,11 @@ def test_the_shipped_bundle_contains_the_phase_5_screens() -> None:
     assert bundles, "index.html loads no JavaScript at all"
 
     source = "\n".join(b.read_text(encoding="utf-8", errors="replace") for b in bundles)
-    for route in ("api/styles", "api/ai/models", "api/features"):
+    # Sentinels: routes recent enough that a stale bundle would not have them,
+    # and spread across the app so one dead screen is caught. `api/styles` was
+    # the original sentinel and is gone with the poster rebuild (ADR-034) —
+    # a sentinel for a deleted route asserts nothing.
+    for route in ("api/posters/generate", "api/ai/models", "api/features"):
         assert route in source, f"the shipped bundle never calls {route}"
 
 

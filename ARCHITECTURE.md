@@ -66,11 +66,15 @@ FG_Tool/
 │       ├── fonts.py        Phase 1 — Malayalam conversion
 │       ├── images.py       Phase 2 — cutout, upscale, DPI calculator
 │       ├── excel.py        Phase 3 — translation + glossary
-│       ├── posters.py      Phase 4 — layout rendering
+│       ├── dictionary.py   Phase 3 — the bundled offline word library
+│       ├── translit.py     Phase 3 — names written by sound, by rule
+│       ├── posters.py      Phase 4 — reads the shop's poster designs
 │       └── ai.py           Phase 5 — Gemini client
 │
 ├── data/
-│   └── maps/               vendored ML-TTKarthika.map
+│   ├── maps/               vendored ML-TTKarthika.map
+│   ├── poster_prompts/     the shop's own poster designs, one file each
+│   └── dictionary/         en-ml.tsv.gz (Olam, ODbL) + trade-en-ml.tsv (ours)
 │
 ├── frontend/
 │   ├── src/                React source
@@ -96,6 +100,7 @@ FastAPI route  ── validates input (Pydantic)
 backend/features/*.py  ── the actual work
    │
    ├──► data/maps/        (Phase 1, pure lookup)
+   ├──► data/dictionary/  (Phase 3, pure lookup — ADR-032)
    ├──► models/           (Phases 2–3, load → run → unload)
    ├──► SQLite            (glossary, prompts, settings, history)
    └──► Gemini API        (Phase 5 only — the only outbound network call)

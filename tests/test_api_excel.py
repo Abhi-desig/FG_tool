@@ -311,15 +311,23 @@ def test_the_check_is_off_unless_asked_for(monkeypatch: pytest.MonkeyPatch) -> N
 
 @needs_engine
 def test_a_correction_reaches_the_right_cell(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The wiring that matters: verdicts are zipped back onto the right rows."""
+    """The wiring that matters: verdicts are zipped back onto the right rows.
+
+    Aimed at `Fresh mango pickle` rather than `Coconut oil`, and that choice is
+    the point of the test rather than an accident of it. Only rows that actually
+    reached the model are sent to the paid check, so the zip is over a *subset*
+    of the grid — which is exactly the alignment that goes wrong quietly. Since
+    ADR-032 the word library answers `Coconut oil` outright, so it is now one of
+    the rows that must be skipped and stepped over correctly.
+    """
 
     def fake_check(
         pairs: list[tuple[str, str]], *args: object, **kwargs: object
     ) -> verify.VerifyResult:
         # Correct exactly one source, leave the rest, so a misalignment shows.
         verdicts = [
-            verify.Verdict("തേങ്ങാ എണ്ണ", checked=True, corrected=True)
-            if source == "Coconut oil"
+            verify.Verdict("പുതിയ മാങ്ങ അച്ചാർ", checked=True, corrected=True)
+            if source == "Fresh mango pickle"
             else verify.Verdict(current, checked=True)
             for source, current in pairs
         ]
@@ -337,16 +345,20 @@ def test_a_correction_reaches_the_right_cell(monkeypatch: pytest.MonkeyPatch) ->
     assert done["status"] == "done", done
 
     rows = {r["key"]: r for r in done["result"]["rows"]}
-    corrected = rows["Catalogue!A2"]
-    assert corrected["source"] == "Coconut oil"
-    assert corrected["translation"] == "തേങ്ങാ എണ്ണ"
+    corrected = rows["Catalogue!A3"]
+    assert corrected["source"] == "Fresh mango pickle"
+    assert corrected["translation"] == "പുതിയ മാങ്ങ അച്ചാർ"
     assert corrected["verify_corrected"] is True
     # The offline reading is kept, not discarded — the operator decides.
-    assert corrected["offline_translation"] != "തേങ്ങാ എണ്ണ"
+    assert corrected["offline_translation"] != "പുതിയ മാങ്ങ അച്ചാർ"
+
+    # The library answered this one, so it was never sent and never charged for.
+    assert rows["Catalogue!A2"]["from_dictionary"] is True
+    assert rows["Catalogue!A2"]["checked"] is False
 
     # Every other row is untouched and not falsely marked as changed.
     for key, row in rows.items():
-        if key == "Catalogue!A2":
+        if key == "Catalogue!A3":
             continue
         assert row["verify_corrected"] is False
         assert row["translation"] == row["offline_translation"]
@@ -436,7 +448,10 @@ def test_an_edited_cell_is_remembered_after_export() -> None:
     rows = {r["source"]: r for r in done["result"]["rows"]}
 
     final = {r["key"]: r["translation"] for r in done["result"]["rows"]}
-    final[rows["Coconut oil"]["key"]] = "വെളിച്ചെണ്ണ"
+    # Deliberately not വെളിച്ചെണ്ണ. That is what the word library already says,
+    # so "editing" the cell to it would be no edit at all — and a memory entry
+    # duplicating the library would be stored for nothing (ADR-032).
+    final[rows["Coconut oil"]["key"]] = "തേങ്ങാ എണ്ണ"
     response = client.post(
         "/api/excel/export", json={"job_id": started["id"], "translations": final}
     )
@@ -444,7 +459,7 @@ def test_an_edited_cell_is_remembered_after_export() -> None:
     assert response.headers["X-Corrections-Remembered"] == "1"
 
     remembered = {c["source"]: c["target"] for c in _corrections()}
-    assert remembered == {"Coconut oil": "വെളിച്ചെണ്ണ"}
+    assert remembered == {"Coconut oil": "തേങ്ങാ എണ്ണ"}
 
 
 @needs_engine
@@ -594,11 +609,21 @@ def test_a_glossary_only_cell_is_never_sent_to_claude(
 def test_the_quote_does_not_count_cells_the_memory_already_covers() -> None:
     """Defect: `inspect` took no client, so the estimate counted rows that
     would never reach the model — an over-quote on the one number the operator
-    uses to decide whether to spend."""
+    uses to decide whether to spend.
+
+    Uses `Fresh mango pickle` rather than `Coconut oil`: the latter is a word
+    library headword and so is already off the quote before the memory has
+    anything to say about it, which would make this test pass for the wrong
+    reason. What is measured here is the memory's own effect on the number.
+    """
     before = client.post("/api/excel/inspect", files=upload()).json()
     client.put(
         "/api/corrections",
-        json={"corrections": [{"source": "Coconut oil", "target": "വെളിച്ചെണ്ണ"}]},
+        json={
+            "corrections": [
+                {"source": "Fresh mango pickle", "target": "പുതിയ മാങ്ങ അച്ചാർ"}
+            ]
+        },
     )
     after = client.post("/api/excel/inspect", files=upload()).json()
 
@@ -606,6 +631,18 @@ def test_the_quote_does_not_count_cells_the_memory_already_covers() -> None:
     assert after["to_translate"] == before["to_translate"] - 1
     assert after["verify"]["rows"] == before["verify"]["rows"] - 1
     assert after["verify"]["cost_paise"] < before["verify"]["cost_paise"]
+
+
+def test_the_quote_does_not_count_cells_the_word_library_answers() -> None:
+    """The same promise, for the layer ADR-032 added.
+
+    `Coconut oil` is a headword, so it never reaches the model and must not be
+    quoted as though it will — on a catalogue of product names that is most of
+    the sheet, and it is the number the operator decides on.
+    """
+    body = client.post("/api/excel/inspect", files=upload()).json()
+    assert body["from_dictionary"] >= 1
+    assert body["from_dictionary"] + body["to_translate"] <= body["unique_strings"]
 
 
 def test_a_clients_correction_overrides_the_shop_wide_one(a_client: int) -> None:
@@ -752,3 +789,117 @@ def test_an_untouched_remembered_row_is_not_relearned() -> None:
     assert kept["learned_from"] == "an-older-job", (
         "an untouched memory row was re-stamped with the new job"
     )
+
+
+# --- name columns (ADR-033) -----------------------------------------------
+
+
+def members_sheet() -> dict[str, tuple[str, bytes, str]]:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Members"
+    ws.append(["Name", "House name", "Product"])
+    ws.append(["Anil Kumar", "Elavunkal Veedu", "Standee"])
+    ws.append(["Radha Menon", "Thoppil Veedu", "Flex banner"])
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return {
+        "file": (
+            "members.xlsx",
+            buffer.getvalue(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    }
+
+
+def test_inspect_describes_every_column_and_suggests_the_name_ones() -> None:
+    body = client.post("/api/excel/inspect", files=members_sheet()).json()
+    by_key = {c["key"]: c for c in body["columns"]}
+
+    assert set(by_key) == {"Members!A", "Members!B", "Members!C"}
+    assert by_key["Members!A"]["looks_like_names"] is True
+    assert by_key["Members!B"]["looks_like_names"] is True
+    # A product column must never be pre-ticked: spelling a real word by sound
+    # is exactly as wrong as translating a name.
+    assert by_key["Members!C"]["looks_like_names"] is False
+    # The samples are what the operator recognises the column by.
+    assert "Anil Kumar" in by_key["Members!A"]["sample"]
+
+
+def test_a_ticked_column_is_written_by_sound_not_translated() -> None:
+    started = client.post(
+        "/api/excel/translate",
+        files=members_sheet(),
+        data={"name_columns": "Members!A,Members!B"},
+    ).json()
+    done = wait_for(started["id"])
+    assert done["status"] == "done", done
+
+    rows = {r["key"]: r for r in done["result"]["rows"]}
+    assert rows["Members!A2"]["translation"] == "അനിൽ കുമർ"
+    assert rows["Members!A2"]["from_name"] is True
+    assert rows["Members!B2"]["translation"] == "എലവുങ്കൽ വീട്"
+
+    # Exact by construction, so nothing may be flagged and nothing may be
+    # bought from the paid check.
+    assert rows["Members!A2"]["needs_attention"] is False
+    assert rows["Members!A2"]["checked"] is False
+
+
+def test_a_heading_is_translated_even_inside_a_ticked_column() -> None:
+    """`Name` and `House name` are ordinary words. Spelled by sound they came
+    back as നമെ and ഹൗസ് നമെ, sitting at the top of the column a client reads
+    first."""
+    started = client.post(
+        "/api/excel/translate",
+        files=members_sheet(),
+        data={"name_columns": "Members!A,Members!B"},
+    ).json()
+    rows = {r["key"]: r for r in wait_for(started["id"])["result"]["rows"]}
+
+    assert rows["Members!A1"]["source"] == "Name"
+    assert rows["Members!A1"]["from_name"] is False
+    assert rows["Members!A1"]["translation"] == "പേര്"
+
+
+def test_an_unticked_column_is_untouched_by_the_name_rule() -> None:
+    started = client.post(
+        "/api/excel/translate",
+        files=members_sheet(),
+        data={"name_columns": "Members!A"},
+    ).json()
+    rows = {r["key"]: r for r in wait_for(started["id"])["result"]["rows"]}
+
+    assert rows["Members!C2"]["from_name"] is False
+    assert rows["Members!C2"]["translation"] == "സ്റ്റാൻഡി"
+    assert rows["Members!B2"]["from_name"] is False
+
+
+def test_ticking_nothing_changes_nothing() -> None:
+    """The default must be the behaviour that existed before this feature."""
+    started = client.post("/api/excel/translate", files=members_sheet()).json()
+    result = wait_for(started["id"])["result"]
+    assert result["from_name"] == 0
+    assert all(r["from_name"] is False for r in result["rows"])
+
+
+def test_the_operators_correction_beats_the_transliteration() -> None:
+    """Names sit second in the precedence order, under the memory only."""
+    client.put(
+        "/api/corrections",
+        json={"corrections": [{"source": "Anil Kumar", "target": "അനിൽ കുമാർ"}]},
+    )
+    try:
+        started = client.post(
+            "/api/excel/translate",
+            files=members_sheet(),
+            data={"name_columns": "Members!A"},
+        ).json()
+        rows = {r["key"]: r for r in wait_for(started["id"])["result"]["rows"]}
+        assert rows["Members!A2"]["translation"] == "അനിൽ കുമാർ"
+        assert rows["Members!A2"]["from_memory"] is True
+        assert rows["Members!A2"]["from_name"] is False
+    finally:
+        for row in db.get_corrections(None, limit=500, offset=0):
+            if row["source"] == "Anil Kumar":
+                db.delete_correction(int(row["id"]))

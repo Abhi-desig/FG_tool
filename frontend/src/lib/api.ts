@@ -362,6 +362,18 @@ export interface VerifyQuote {
   is_estimate: boolean
 }
 
+export interface SheetColumn {
+  /** "Sheet!C" — what the translate call is given back. */
+  key: string
+  sheet: string
+  letter: string
+  header: string
+  count: number
+  sample: string[]
+  /** A suggestion to pre-tick, never a decision already taken. */
+  looks_like_names: boolean
+}
+
 export interface SheetInfo {
   sheets: string[]
   total_cells: number
@@ -374,6 +386,10 @@ export interface SheetInfo {
   from_memory?: number
   /** Cells the client's glossary covers entirely. Also free and offline. */
   from_glossary?: number
+  /** Cells the bundled word library answers outright. Free and offline too. */
+  from_dictionary?: number
+  /** Every column with text in it, and which look like people and places. */
+  columns?: SheetColumn[]
   /** What is actually left for the model, and what the quote is based on. */
   to_translate?: number
   verify?: VerifyQuote
@@ -389,6 +405,10 @@ export interface ReviewRow {
   glossary_only: boolean
   /** Filled from a correction the operator approved on an earlier sheet. */
   from_memory?: boolean
+  /** Answered outright by the bundled word library — a lookup, not a guess. */
+  from_dictionary?: boolean
+  /** In a column marked as names, so written by sound rather than translated. */
+  from_name?: boolean
   lost_terms: string[]
   /** `problems` then `checks`, flat — kept for anything reading the old shape. */
   warnings: string[]
@@ -431,6 +451,10 @@ export interface TranslationResult {
   from_glossary: number
   /** Rows filled from the corrections memory, so never sent anywhere. */
   from_memory?: number
+  /** Rows the word library answered, so never sent anywhere either. */
+  from_dictionary?: number
+  /** Rows written by sound because they sit in a column marked as names. */
+  from_name?: number
   /** False when the sheet was translated with no glossary in force. */
   glossary_applied: boolean
   glossary_terms: number
@@ -526,7 +550,12 @@ export function inspectSheet(file: File, clientId: number | null = null): Promis
 export function startTranslate(
   file: File,
   clientId: number | null,
-  options: { checkWithClaude?: boolean; overBudgetOk?: boolean } = {},
+  options: {
+    checkWithClaude?: boolean
+    overBudgetOk?: boolean
+    /** "Sheet!C" keys whose cells are people and places, not words. */
+    nameColumns?: string[]
+  } = {},
 ): Promise<Job> {
   const form = new FormData()
   form.append("file", file)
@@ -535,6 +564,9 @@ export function startTranslate(
   // unaffected by the ordinary offline path.
   if (options.checkWithClaude) form.append("check_with_claude", "true")
   if (options.overBudgetOk) form.append("over_budget_ok", "true")
+  if (options.nameColumns?.length) {
+    form.append("name_columns", options.nameColumns.join(","))
+  }
   return upload<Job>("/api/excel/translate", form)
 }
 
@@ -675,160 +707,159 @@ export function translationSettings(): Promise<{
   return request("/api/settings/translation")
 }
 
-// --- Phase 4: posters -----------------------------------------------------
+// --- the word library -----------------------------------------------------
 
-export type BlockSize = "small" | "medium" | "large" | "huge"
-export type TextMode = "unicode" | "ascii"
-export type BlockAlign = "left" | "centre" | "right"
+/** Where one row's Malayalam came from. "yours" always wins over the other two. */
+export type WordOrigin = "yours" | "trade" | "olam"
 
-export interface CanvasPreset {
-  key: string
-  label: string
-  width_mm: number
-  height_mm: number
-  width_px: number
-  height_px: number
-  dpi: number
-  safe_mm: number
-  aspect: number
+export interface WordRow {
+  source: string
+  target: string
+  alternatives: string[]
+  origin: WordOrigin
+  /** What the bundled library says, when the operator has overridden it. */
+  bundled: string
 }
 
-/** What a line *is* on the poster. A style colours the headline, not block `t3`. */
-export type BlockRole = "headline" | "offer" | "occasion" | "phone" | "free"
-
-/** "as typed" or shouted. Only two: Malayalam is unicameral, so title case is
- * meaningless there and locale-dependent for Latin. */
-export type TextCase = "as-typed" | "upper"
-
-export interface PosterBlock {
-  id: string
-  text: string
-  x: number
-  y: number
-  width: number
-  size: BlockSize
-  /** Overrides `size` when set: text height as a fraction of canvas height. */
-  size_fraction: number | null
-  weight: "regular" | "bold"
-  /** Letter spacing in ems. */
-  tracking: number
-  /** Line spacing as a multiple of font size. */
-  leading: number
-  colour: string
-  align: BlockAlign
-  case: TextCase
-  mode: TextMode
-  shadow: boolean
-  role: BlockRole
+export interface WordPage {
+  rows: WordRow[]
+  total: number
+  offset: number
+  page: number
+  bundled: number
+  overrides: number
 }
 
-export interface PosterLayout {
-  canvas: string
-  blocks: PosterBlock[]
-  background_colour: string
+export interface WordImport {
+  added: number
+  updated: number
+  skipped: number
+  rows: number
+  unchanged: number
+  truncated: boolean
+  blank_rows: number
+  overrides: number
 }
 
-export interface PosterCheck {
-  canvas: { key: string; width_px: number; height_px: number; safe_fraction: [number, number] }
-  safe_zone: {
-    id: string
-    outside_safe_zone: boolean
-    extent: { x0: number; y0: number; x1: number; y1: number }
-  }[]
-  overflow: {
-    id: string
-    message: string
-    /** True when the text will actually be trimmed off the printed sheet. */
-    past_trim: boolean
-    measured: boolean
-  }[]
-  /** What auto-fit changed. Not a warning — but the operator must be told. */
-  fitted: { id: string; message: string; scale: number; lines: number }[]
-  blocks: {
-    id: string
-    font_px: number
-    scale: number
-    lines: string[]
-    over_box: boolean
-    overflows: boolean
-  }[]
+export function searchWords(q: string, offset = 0): Promise<WordPage> {
+  const params = new URLSearchParams()
+  if (q) params.set("q", q)
+  params.set("offset", String(offset))
+  return request(`/api/dictionary?${params}`)
 }
 
-export function posterPresets(): Promise<{
-  canvases: CanvasPreset[]
-  sizes: Record<BlockSize, number>
-  fonts: { unicode: string; ascii: string }
-}> {
-  return request("/api/posters/presets")
-}
-
-/** One line of a pasted message, and the part of the poster it was guessed to be. */
-export interface CopyLine {
-  text: string
-  role: BlockRole
-}
-
-/**
- * Sort one pasted WhatsApp message into the lines a poster is made of.
- * Offline and free. Every line comes back, in order — nothing is dropped.
- */
-export function splitCopy(text: string): Promise<{ lines: CopyLine[] }> {
-  return request("/api/posters/split-copy", {
-    method: "POST",
-    body: JSON.stringify({ text }),
+export function putWordOverride(
+  source: string,
+  target: string,
+): Promise<{ added: number; updated: number; skipped: number }> {
+  return request("/api/dictionary/override", {
+    method: "PUT",
+    body: JSON.stringify({ source_term: source, target_term: target }),
   })
 }
 
-/**
- * `measured` carries each block's real width at 1 em, measured in the browser
- * with the poster font loaded. The server has no shaping engine, so without
- * these it can only estimate — see `lib/textFit`.
- */
-export function checkPoster(
-  layout: PosterLayout,
-  measured: Record<string, number> = {},
-): Promise<PosterCheck> {
-  return request<PosterCheck>("/api/posters/check", {
-    method: "POST",
-    body: JSON.stringify({ layout, measured }),
-  })
+export function importWords(file: File): Promise<WordImport> {
+  const form = new FormData()
+  form.append("file", file)
+  return upload<WordImport>("/api/dictionary/import", form)
 }
 
-export function autoLayout(
-  layout: PosterLayout,
-  bg: File,
-  place: boolean,
-): Promise<{ blocks: PosterBlock[] }> {
-  const form = new FormData()
-  form.append("layout", JSON.stringify(layout))
-  form.append("background", bg)
-  form.append("place", String(place))
-  return upload("/api/posters/auto", form)
-}
-
-/** SVG is a file download, so it bypasses the JSON request helper. */
-export async function posterSvg(
-  layout: PosterLayout,
-  bg: File | null,
-  safeZone: boolean,
-  measured: Record<string, number> = {},
-): Promise<Blob> {
-  const form = new FormData()
-  form.append("layout", JSON.stringify(layout))
-  form.append("safe_zone", String(safeZone))
-  // Without this the export re-fits from the server's estimate and could break
-  // the text differently from the preview the operator just approved.
-  form.append("measured", JSON.stringify(measured))
-  if (bg) form.append("background", bg)
-  const response = await fetch("/api/posters/svg", { method: "POST", body: form })
-  if (!response.ok) throw new ApiError(`Export failed (${response.status})`, response.status)
+/** Same Blob-not-URL rule as `downloadCorrections`, for the same reason. */
+export async function downloadWords(): Promise<Blob> {
+  const response = await fetch("/api/dictionary/export")
+  if (!response.ok) {
+    throw new ApiError(`Download failed (${response.status})`, response.status)
+  }
   return response.blob()
+}
+
+// --- Posters --------------------------------------------------------------
+//
+// Gemini draws the whole poster from one of the shop's own designs in
+// `data/poster_prompts/`. The canvas editor, layout presets and SVG export that
+// used to live here are gone with ADR-034 — and with them the guarantee that
+// Malayalam was spelled correctly and every line stayed editable.
+
+/** The tags the operator writes in front of their copy. */
+export type CopyTag = "main" | "h1" | "h2"
+
+/** One design from the prompt folder. The prompt body itself never leaves the server. */
+export interface PosterDesign {
+  key: string
+  name: string
+  description: string
+}
+
+export interface PosterCopy {
+  main?: string
+  h1?: string
+  h2?: string
+}
+
+export function posterDesigns(): Promise<{
+  designs: PosterDesign[]
+  count: number
+  /** Shown in the empty state, so the operator knows where their files go. */
+  folder: string
+  tags: CopyTag[]
+}> {
+  return request("/api/posters/designs")
+}
+
+/** What the app read out of the pasted copy. Free, offline, no model. */
+export function parsePosterCopy(copy: string): Promise<{
+  copy: PosterCopy
+  tags: CopyTag[]
+  missing: CopyTag[]
+}> {
+  const form = new FormData()
+  form.append("copy", copy)
+  return upload("/api/posters/parse", form)
+}
+
+export function generatePoster(body: {
+  copy: string
+  design: string
+  reference?: File | null
+  batch?: boolean
+  overBudgetOk?: boolean
+}): Promise<AiResult> {
+  const form = new FormData()
+  form.append("copy", body.copy)
+  form.append("design", body.design)
+  if (body.reference) form.append("reference", body.reference)
+  form.append("batch", body.batch === false ? "false" : "true")
+  if (body.overBudgetOk) form.append("over_budget_ok", "true")
+  return upload<AiResult>("/api/posters/generate", form)
+}
+
+/**
+ * Change the poster that was just made.
+ *
+ * The poster goes back up from the browser rather than being held on the
+ * server: it is already in the page, and the operator may have stepped back to
+ * an earlier attempt.
+ */
+export function refinePoster(body: {
+  poster: Blob
+  note: string
+  overBudgetOk?: boolean
+}): Promise<AiResult> {
+  const form = new FormData()
+  form.append("poster", body.poster, "poster.png")
+  form.append("note", body.note)
+  if (body.overBudgetOk) form.append("over_budget_ok", "true")
+  return upload<AiResult>("/api/posters/refine", form)
 }
 
 // --- Phase 5: AI ----------------------------------------------------------
 
 export type AiFeature =
   | "photo-edit"
+  | "poster"
+  | "poster-concept"
+  // Retired, and still readable: `ai_spend` holds real rows under these names
+  // and the Settings spend view must render the shop's own history (ADR-034).
   | "poster-artwork"
   | "poster-layout"
   | "poster-copy"
@@ -1000,119 +1031,6 @@ export function editPhoto(
  * in with the copy below — which is why the picture ends up about the message
  * rather than about whatever the operator managed to describe in a hurry.
  */
-export interface ArtworkRequest {
-  style_key?: string | null
-  headline?: string
-  offer?: string
-  occasion?: string
-  phone?: string
-  /** The operator's own idea for the picture, when they have one. */
-  idea?: string
-  subject?: string
-  style?: string
-  palette?: string
-  aspect?: string
-  batch?: boolean
-  /** The operator's explicit "spend past the monthly budget". */
-  over_budget_ok?: boolean
-}
-
-export function generateArtwork(body: ArtworkRequest): Promise<AiResult> {
-  return request<AiResult>("/api/ai/artwork", {
-    method: "POST",
-    body: JSON.stringify(body),
-  })
-}
-
-/** Free. The exact words that would be sent, so nothing is hidden. */
-export function artworkPrompt(body: ArtworkRequest): Promise<{
-  prompt: string
-  style_key: string | null
-  estimate: { cost_rupees: number; cost_paise: number; model: string }
-}> {
-  return request("/api/ai/artwork/prompt", {
-    method: "POST",
-    body: JSON.stringify(body),
-  })
-}
-
-// --- design styles --------------------------------------------------------
-
-/** How the words are styled when a look is chosen. Half a style is not a style. */
-/**
- * One role's look inside a saved style.
- *
- * Every field is optional on the wire because styles saved before typography
- * existed carry only colour, size and weight. The server fills the rest in on
- * read (`styles.normalise_text_defaults`), which is what made this need no
- * database migration.
- */
-export interface StyleTextDefault {
-  colour?: string
-  size?: BlockSize
-  size_fraction?: number | null
-  weight?: "regular" | "bold"
-  tracking?: number
-  leading?: number
-  align?: BlockAlign
-  case?: TextCase
-}
-
-export interface StyleTextDefaults {
-  background_colour?: string
-  headline?: StyleTextDefault
-  offer?: StyleTextDefault
-  occasion?: StyleTextDefault
-  phone?: StyleTextDefault
-}
-
-export interface DesignStyle {
-  id: number
-  key: string
-  name: string
-  description: string
-  body: string
-  palette: string
-  swatches: string[]
-  text_defaults: StyleTextDefaults
-  is_default: boolean
-  sort_order: number
-  updated_at: string
-}
-
-export function listStyles(): Promise<{
-  styles: DesignStyle[]
-  variables: string[]
-  required: string[]
-}> {
-  return request("/api/styles")
-}
-
-export function validateStyle(body: string): Promise<{ problems: string[] }> {
-  return request("/api/styles/validate", {
-    method: "POST",
-    body: JSON.stringify({ key: "check", name: "check", body }),
-  })
-}
-
-export function saveStyle(
-  style: Omit<DesignStyle, "id" | "is_default" | "sort_order" | "updated_at">,
-  styleId?: number,
-): Promise<{ style: DesignStyle; problems: string[] }> {
-  return request("/api/styles", {
-    method: "PUT",
-    body: JSON.stringify({ ...style, style_id: styleId ?? null }),
-  })
-}
-
-export function restoreStyleDefault(id: number): Promise<{ style: DesignStyle }> {
-  return request(`/api/styles/${id}/restore-default`, { method: "POST" })
-}
-
-export function deleteStyle(id: number): Promise<{ styles: DesignStyle[] }> {
-  return request(`/api/styles/${id}`, { method: "DELETE" })
-}
-
 // --- which model does which job -------------------------------------------
 
 export interface AiModel {
@@ -1152,103 +1070,5 @@ export function setAiModels(
   return request("/api/ai/models", {
     method: "PUT",
     body: JSON.stringify(choices),
-  })
-}
-
-
-// --- the AI writes the poster's words (ADR-030) ---------------------------
-
-export interface CopyBlock {
-  id: BlockRole
-  text: string
-}
-
-export interface CopyAlternative {
-  id: string
-  label: string
-  /** English. */
-  blocks: CopyBlock[]
-  /** The same lines in Malayalam. Always real Unicode, never transliteration. */
-  blocks_ml: CopyBlock[]
-}
-
-export interface CopyRequest {
-  brief: string
-  occasion?: string
-  tone?: string
-  shop?: string
-  /** Lines you have committed to. Sent as "must stay exactly as written". */
-  keep_headline?: string
-  keep_offer?: string
-  keep_occasion?: string
-  /** Never sent to Google — put back locally after the call. */
-  phone?: string
-  over_budget_ok?: boolean
-}
-
-export interface CopyResult extends AiResult {
-  alternatives?: CopyAlternative[]
-}
-
-export function writeCopy(body: CopyRequest): Promise<CopyResult> {
-  return request("/api/ai/copy", { method: "POST", body: JSON.stringify(body) })
-}
-
-/** Free. The exact words that would be sent, so nothing about it is hidden. */
-export function copyPrompt(body: CopyRequest): Promise<{
-  prompt: string
-  estimate: { cost_paise: number; cost_rupees: number; model: string }
-}> {
-  return request("/api/ai/copy/prompt", {
-    method: "POST",
-    body: JSON.stringify(body),
-  })
-}
-
-// --- the two routes that shipped without a caller -------------------------
-//
-// Both were fully implemented on the server and had no wrapper here, so the
-// features they back were only half-reachable.
-
-export interface CalmRegion {
-  x: number
-  y: number
-  width: number
-  height: number
-  /** 0–1. Lower is quieter, and quieter is where words stay readable. */
-  busyness: number
-  mean_luminance: number
-}
-
-/** Where a background picture is quiet enough to put words. Offline and free. */
-export function analysePoster(file: File): Promise<{
-  width: number
-  height: number
-  calm_regions: CalmRegion[]
-}> {
-  const form = new FormData()
-  form.append("file", file)
-  return upload("/api/posters/analyse", form)
-}
-
-export interface LayoutPlanRequest {
-  headline: string
-  offer?: string
-  occasion?: string
-  phone?: string
-  tone?: string
-  over_budget_ok?: boolean
-}
-
-/**
- * Ask the AI where the words should go. Positions only — never text.
- *
- * `verify_text_unchanged` on the server puts the operator's exact wording back
- * if the model altered or dropped it, so this cannot change what the poster says.
- */
-export function layoutPlan(body: LayoutPlanRequest): Promise<AiResult> {
-  return request("/api/ai/layout-plan", {
-    method: "POST",
-    body: JSON.stringify(body),
   })
 }

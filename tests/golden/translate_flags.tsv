@@ -6,25 +6,40 @@
 #   problem  — demonstrably wrong; the operator must fix it
 #   check    — nothing can vouch for it; the operator must read it
 #   clean    — must raise nothing at all
+#   library  — never reaches the model: the word library answers it outright
+#   composed — built from trade terms alone; never reaches the model
+#   gap      — known and accepted: nothing here catches this one. See below.
 #
-# MEASURED. Every `problem` and `check` row is real output from
-# opus-mt-en-ml over a realistic 18-string price list, recorded in NEXT.md 1.6
-# on 2026-08-26. At the time, the ONLY detector that fired was a word-count
-# heuristic, on 4 rows — every row below came back `needs_attention: false`.
+# MEASURED. Every row is real output from opus-mt-en-ml over a realistic
+# 18-string price list, recorded in NEXT.md 1.6 on 2026-08-26. At the time, the
+# ONLY detector that fired was a word-count heuristic, on 4 rows — every row
+# below came back `needs_attention: false`.
 #
 # Why these are the hard cases: a word-count heuristic cannot fire on a
 # one-word cell, and one-word cells are exactly the product names. The `clean`
 # rows exist to stop the fix from flagging everything, which would be the same
 # failure wearing the opposite coat.
-Standee	സെന്റ് കിറ്റ്സ് ആൻഡ് നെവിസ്	check	"Saint Kitts and Nevis" — a product name became a country
-Brochure	തകർച്ച	check	"breaking"
-Visiting Card	കാർഡ് സന്ദർശിക്കുന്നു	check	"card is visiting"
-Focus Digitals	ഡിജിറ്റൽ ഡിജിറ്റൽസ്	check	"Digital Digitals" — the shop's own name
-300 gsm matte	300 ജിഎസ്എം ഗണിതം	check	"300 gsm mathematics"
+#
+# ADR-032 changed what the right answer is for most of them. A warning saying
+# "nothing here can check this, go and add a glossary entry" was the best this
+# file could ask for while the tool did not know the word. It knows now, so the
+# assertion is no longer "was it flagged?" but the far stronger "did it come
+# back correct, without the model being consulted at all?".
+#
+# The `gap` row is the honest cost of that change, and it is written down rather
+# than quietly dropped: `Focus Digitals` is a proper noun, no dictionary will
+# ever hold it, and the short-cell warning that used to catch it is gone. It is
+# covered instead by the corrections memory the first time the operator fixes
+# it (ADR-029) — but until they do, nothing here fires.
+Standee	സെന്റ് കിറ്റ്സ് ആൻഡ് നെവിസ്	library	"Saint Kitts and Nevis" — a product name became a country
+Brochure	തകർച്ച	library	"breaking"
+Visiting Card	കാർഡ് സന്ദർശിക്കുന്നു	library	"card is visiting"
+Product	നിർമ്മാണം	library	"manufacturing"
+300 gsm matte	300 ജിഎസ്എം ഗണിതം	composed	"300 gsm mathematics" — now built as 300 + ജിഎസ്എം + മാറ്റ്
+Focus Digitals	ഡിജിറ്റൽ ഡിജിറ്റൽസ്	gap	"Digital Digitals" — the shop's own name, a proper noun
 6x4 feet	6x4 മീറ്റ	problem	feet -> metre: a unit error on a price list
-Product	നിർമ്മാണം	check	"manufacturing"
 500 g jar	500 ഗ്രാം	problem	"jar" dropped outright
 Total amount payable	മൊത്തം തുക	problem	three words to two
 Price per kilogram	ഒരു കിലോഗ്രാം വില	clean	correct, and must not trip the unit check
-Onam wishes	ഓണം ആശംസകൾ	check	correct, but a 2-word cell nothing can verify
+Onam wishes	ഓണം ആശംസകൾ	clean	correct output — and no longer nagged about
 6x4 feet	6x4 അടി	clean	correct unit, must not fire

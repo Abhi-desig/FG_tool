@@ -19,7 +19,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend import config, crypto, db
-from backend.features import ai, images, prompts, styles
+from backend.features import ai, images, prompts
 
 router = APIRouter(prefix="/api", tags=["ai"])
 
@@ -240,83 +240,14 @@ def ai_status() -> dict[str, object]:
 
 @router.get("/ai/estimate")
 def ai_estimate(
-    feature: Literal["photo-edit", "poster-artwork", "poster-layout", "poster-copy"],
+    # Only the live features. The retired names stay valid in `ai.Feature` so the
+    # spend history still renders, but there is nothing left to quote for them.
+    feature: Literal["photo-edit", "poster", "poster-concept"],
     batch: bool = True,
 ) -> dict[str, object]:
     """Free. Says what a call will cost before the operator commits."""
     return ai.estimate(feature, batch)
 
-
-
-# --- writing the words (ADR-030) -------------------------------------------
-
-
-class CopyIn(BaseModel):
-    """A brief, and the lines the operator has already committed to.
-
-    Every field is bounded for the reason `ArtworkIn` gives: the cost is a flat
-    per-call rate, so an unbounded field grows Google's bill while the budget
-    meter does not move.
-    """
-
-    brief: str = Field(min_length=1, max_length=2000)
-    occasion: str = Field(default="", max_length=200)
-    tone: str = Field(default="", max_length=200)
-    shop: str = Field(default="", max_length=200)
-    # Lines to keep word for word. Sent as "must stay exactly as written",
-    # checked on return, and put back if the model rewrote or dropped them.
-    keep_headline: str = Field(default="", max_length=500)
-    keep_offer: str = Field(default="", max_length=500)
-    keep_occasion: str = Field(default="", max_length=200)
-    # **Never sent to Google.** Held only so the digits in it count as the
-    # operator's own, and substituted locally afterwards.
-    phone: str = Field(default="", max_length=100)
-    over_budget_ok: bool = False
-
-    def locked(self) -> dict[str, str]:
-        pairs = {
-            "headline": self.keep_headline.strip(),
-            "offer": self.keep_offer.strip(),
-            "occasion": self.keep_occasion.strip(),
-        }
-        return {k: v for k, v in pairs.items() if v}
-
-    def values(self) -> dict[str, str]:
-        keep = self.locked()
-        return {
-            "brief": self.brief.strip(),
-            "occasion": self.occasion.strip(),
-            "tone": self.tone.strip(),
-            "shop": self.shop.strip(),
-            "keep": "; ".join(f"{k}: {v}" for k, v in keep.items()),
-        }
-
-
-@router.post("/ai/copy/prompt")
-def copy_prompt(body: CopyIn) -> dict[str, object]:
-    """Exactly what would be sent, and what it costs. Free — nothing is called."""
-    return {
-        "prompt": ai.copy_prompt(body.values()),
-        "estimate": ai.estimate("poster-copy", False),
-    }
-
-
-@router.post("/ai/copy")
-def write_copy(body: CopyIn) -> dict[str, object]:
-    """Write several sets of poster words. A refusal is a 200 — see `_result`."""
-    result = ai.write_copy(
-        body.values(), body.locked(), over_budget_ok=body.over_budget_ok
-    )
-    payload = _result(result)
-    # The operator's own phone, put back locally. It was never in the request to
-    # Google and it is not the model's to invent.
-    if result.alternatives is not None and body.phone.strip():
-        for alt in result.alternatives:
-            for key in ("blocks", "blocks_ml"):
-                blocks = alt.get(key)
-                if isinstance(blocks, list):
-                    blocks.append({"id": "phone", "text": body.phone.strip()})
-    return payload
 
 
 @router.get("/ai/spend")
@@ -384,82 +315,5 @@ def photo_edit(
             {"instruction": instruction, "preserve": preserve},
             batch,
             over_budget_ok,
-        )
-    )
-
-
-class ArtworkIn(BaseModel):
-    """A picture request, described by the poster's own copy.
-
-    `style_key` is what makes this different from a plain image prompt: with one,
-    the shop's saved prompt structure for that look is filled in with the copy
-    below, so the picture ends up about the message rather than about whatever
-    the operator managed to describe in a hurry.
-    """
-
-    style_key: str | None = Field(default=None, max_length=40)
-    headline: str = Field(default="", max_length=500)
-    offer: str = Field(default="", max_length=500)
-    occasion: str = Field(default="", max_length=200)
-    phone: str = Field(default="", max_length=100)
-    # The operator's own idea for the picture, when they have one.
-    idea: str = Field(default="", max_length=2000)
-    # Free-form fallback, and what the prompt-library template still uses.
-    subject: str = Field(default="", max_length=2000)
-    # Every field that reaches a prompt is bounded. Cost is recorded as a flat
-    # per-call rate whatever the token count, so an unbounded field grows the
-    # real Google bill while the budget meter does not move (NEXT.md 1.1).
-    style: str = Field(default="", max_length=200)
-    palette: str = Field(default="", max_length=200)
-    aspect: str = Field(default="", max_length=100)
-    batch: bool = True
-    # The operator's explicit "spend past the budget". Never defaulted on.
-    over_budget_ok: bool = False
-
-    def values(self) -> dict[str, str]:
-        return self.model_dump(exclude={"batch", "style_key", "over_budget_ok"})
-
-
-@router.post("/ai/artwork/prompt")
-def artwork_prompt(body: ArtworkIn) -> dict[str, object]:
-    """Free. The exact words that would be sent, so nothing is hidden."""
-    try:
-        text = ai.artwork_prompt(body.values(), body.style_key)
-    except db.NotFound as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except styles.StyleError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return {
-        "prompt": text,
-        "style_key": body.style_key,
-        "estimate": ai.estimate("poster-artwork", body.batch),
-    }
-
-
-@router.post("/ai/artwork")
-def artwork(body: ArtworkIn) -> dict[str, object]:
-    return _result(
-        ai.generate_artwork(
-            body.values(), body.batch, body.style_key, body.over_budget_ok
-        )
-    )
-
-
-class LayoutPlanIn(BaseModel):
-    headline: str = Field(min_length=1, max_length=500)
-    # Bounded for the same reason as ArtworkIn's — see the note there.
-    offer: str = Field(default="", max_length=500)
-    phone: str = Field(default="", max_length=100)
-    occasion: str = Field(default="", max_length=200)
-    tone: str = Field(default="", max_length=200)
-    over_budget_ok: bool = False
-
-
-@router.post("/ai/layout-plan")
-def layout_plan(body: LayoutPlanIn) -> dict[str, object]:
-    """Text only — the AI returns positions, never a picture containing words."""
-    return _result(
-        ai.plan_layout(
-            body.model_dump(exclude={"over_budget_ok"}), body.over_budget_ok
         )
     )

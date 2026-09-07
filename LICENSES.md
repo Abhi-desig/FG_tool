@@ -86,6 +86,29 @@ Licensing was never the blocker — the package being abandoned since 2013 was (
 | `IndicTransToolkit` (1.1.1) | MIT | ✅ Required — the tokenizer lives here now |
 | `openpyxl` | MIT | ✅ |
 | PyTorch / transformers | BSD-3 / Apache-2.0 | ✅ |
+| **Olam English–Malayalam dataset** | **ODbL 1.0** | ⚠️ Commercial use fine — obligations below |
+
+#### The Olam dataset — what ODbL actually requires
+
+`data/dictionary/en-ml.tsv.gz` is built from the Olam open dataset
+(<https://olam.in/p/open/enml>, ~200,000 crowd-sourced entries) by
+`scripts/build_dictionary.py`. Checked before it was bundled, on 2026-09-05.
+
+**ODbL is not a non-commercial licence.** Selling translated catalogues produced with
+it is explicitly fine, in the same way GIMP output is — the clarification at the top of
+this file applies unchanged.
+
+What it does require, and where each obligation is met:
+
+| Obligation | Where it is met |
+|---|---|
+| Attribution travels with the database | The header of `en-ml.tsv.gz` itself, written by the build script and asserted by `test_attribution_travels_with_the_data` |
+| Share-alike on a *derived database* | Only bites if the shop **publishes** a database built from it. Printing from it does not. If the exported `word-library.xlsx` is ever given to another business, it goes with the Olam attribution and under ODbL |
+| No DRM on a distributed copy | Nothing here does that |
+
+**`data/dictionary/trade-en-ml.tsv` is not Olam.** It is the shop's own vocabulary,
+written for this repo, and carries no third-party obligation. Kept in a separate file
+partly for that reason.
 
 ### Phase 4–5 — Posters and AI
 

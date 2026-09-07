@@ -15,7 +15,7 @@ from importlib import import_module
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -110,11 +110,10 @@ async def lifespan(app: FastAPI):
     # and says plainly what else is missing — see `_mount`.
     try:
         from backend import db, models
-        from backend.features import prompts, styles
+        from backend.features import prompts
 
         db.init()
         prompts.seed_defaults()
-        styles.seed_defaults()
         print(f"  device:   {config.device_name()}")
         for model in models.describe():
             state = "ready" if model["available"] else "not downloaded"
@@ -175,7 +174,6 @@ FEATURE_EXTRAS: dict[str, str] = {
     "images": "images",
     "excel": "translate",
     "posters": "images",
-    "styles": "images",
     "ai": "ai",
 }
 
@@ -195,7 +193,7 @@ def _mount(name: str) -> None:
     app.include_router(module.router)
 
 
-for _feature in ("images", "excel", "posters", "styles", "ai"):
+for _feature in ("images", "excel", "posters", "ai"):
     _mount(_feature)
 
 
@@ -209,7 +207,7 @@ def features() -> dict[str, object]:
     return {
         "available": [
             name
-            for name in ("fonts", "images", "excel", "posters", "styles", "ai")
+            for name in ("fonts", "images", "excel", "posters", "ai")
             if name == "fonts" or name not in _missing_features
         ],
         "unavailable": _missing_features,
@@ -340,9 +338,39 @@ def health() -> dict[str, object]:
     }
 
 
+class _UiFiles(StaticFiles):
+    """Serve the built UI, and never let `index.html` be cached.
+
+    **The failure this exists to stop.** Vite content-hashes the bundle, so
+    `assets/index-<hash>.js` is safe to cache forever — a new build has a new
+    name. `index.html` is the opposite: its name never changes and its whole job
+    is to point at the current hash. `StaticFiles` sends no `Cache-Control` at
+    all, so the browser caches it heuristically from `Last-Modified` and keeps
+    serving the *old* html, which loads the *old* bundle.
+
+    Measured on 2026-09-07: after a rebuild the app on `127.0.0.1:8000` was still
+    running `index-DHo_XoUT.js` while the disk held `index-BP57VXzz.js`. The
+    operator sees an app that never updates — fixes land, `dist` is rebuilt, and
+    the screen stays exactly as broken as it was. That is indistinguishable from
+    the fix not working, which is the expensive part.
+    """
+
+    def file_response(self, *args: object, **kwargs: object) -> Response:
+        response = super().file_response(*args, **kwargs)  # type: ignore[arg-type]
+        path = str(kwargs.get("full_path") or (args[0] if args else ""))
+        if path.endswith(".html"):
+            # `no-cache` still allows a 304 — it forbids *using* the copy
+            # without asking, which is the whole point.
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        else:
+            # Hashed filenames. A year is the conventional forever.
+            response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        return response
+
+
 # The built React app. Mounted last so it never shadows /api routes.
 if config.FRONTEND_DIST.is_dir():
-    app.mount("/", StaticFiles(directory=config.FRONTEND_DIST, html=True), name="ui")
+    app.mount("/", _UiFiles(directory=config.FRONTEND_DIST, html=True), name="ui")
 else:
 
     @app.get("/")

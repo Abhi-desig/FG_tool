@@ -12,9 +12,10 @@ Three things make it safe to edit:
 * **Variable checking.** A template referring to `{{colour}}` when its scope only
   provides `{{palette}}` is caught at save time, not halfway through a paid job.
 
-The `poster-layout` default is the load-bearing one: it must return **JSON layout
-data and never image text**, because that constraint is the whole reason this
-shop can produce Malayalam posters at all (ROADMAP.md Phase 4).
+`poster-concept` is the one that shapes a poster now: it turns the operator's
+copy into a visual idea, which is then dropped into whichever design they picked
+from `data/poster_prompts/`. The designs themselves are files, not rows here —
+they are the shop's own work and `features/posters.py` reads them (ADR-034).
 """
 
 from __future__ import annotations
@@ -46,33 +47,15 @@ class Scope:
 
 SCOPES: tuple[Scope, ...] = (
     Scope(
-        key="poster-layout",
-        label="Poster layout plan",
+        key="poster-concept",
+        label="Poster visual idea",
         description=(
-            "Asks the AI where the words should go. Must return JSON only — the "
-            "app draws every word itself, which is why Malayalam comes out right."
+            "Reads the poster's copy and describes the picture it should be. "
+            "Its answer fills {{concept}} in the chosen design. Skipped entirely "
+            "when the operator supplies a reference image instead."
         ),
-        variables=("occasion", "headline", "offer", "phone", "tone"),
-        required=("headline",),
-    ),
-    Scope(
-        key="poster-copy",
-        label="Poster wording",
-        description=(
-            "Writes the poster's words from a plain-language brief, in English "
-            "and Malayalam. Returns JSON only — the app still draws every word."
-        ),
-        # `phone` is deliberately absent: the operator's number never leaves the
-        # machine, and the app substitutes it after the call (ADR-030).
-        variables=("brief", "occasion", "tone", "shop", "keep"),
-        required=("brief",),
-    ),
-    Scope(
-        key="poster-artwork",
-        label="Poster background artwork",
-        description="Generates the picture behind the text. No words in the image.",
-        variables=("subject", "style", "palette", "aspect"),
-        required=("subject",),
+        variables=("main", "h1", "h2"),
+        required=("main",),
     ),
     Scope(
         key="photo-edit",
@@ -87,75 +70,24 @@ SCOPE_KEYS = {s.key: s for s in SCOPES}
 
 # Shipped so the operator opens a working set, not an empty screen.
 SEEDS: dict[str, str] = {
-    "poster-copy": (
-        "You are writing the words for a printed poster for a shop in Kerala.\n"
+    "poster-concept": (
+        "You are deciding what a printed shop poster should look like, from its\n"
+        "words alone.\n"
         "\n"
-        "What the shop wants: {{brief}}\n"
-        "Occasion: {{occasion}}\n"
-        "Tone: {{tone}}\n"
-        "Shop: {{shop}}\n"
-        "Must stay exactly as written: {{keep}}\n"
+        "Headline: {{main}}\n"
+        "Second line: {{h1}}\n"
+        "Third line: {{h2}}\n"
         "\n"
-        "Return ONLY a JSON object, no prose and no code fence, shaped like:\n"
-        '{"alternatives": [\n'
-        '  {"id": "a", "label": "Straight",\n'
-        '   "blocks":    [{"id": "headline", "text": "..."},\n'
-        '                 {"id": "offer",    "text": "..."},\n'
-        '                 {"id": "occasion", "text": "..."}],\n'
-        '   "blocks_ml": [{"id": "headline", "text": "..."},\n'
-        '                 {"id": "offer",    "text": "..."},\n'
-        '                 {"id": "occasion", "text": "..."}]}]}\n'
+        "Reply with two or three sentences describing the picture: the subject,\n"
+        "the mood, the colours, the light, and where the poster should be left\n"
+        "calm so the words stay readable.\n"
         "\n"
         "Rules:\n"
-        "- Give exactly three alternatives, genuinely different from each other:\n"
-        "  one plain and direct, one warm and festive, one very short.\n"
-        '- "blocks" is English. "blocks_ml" is the same three lines in real\n'
-        "  Malayalam script (Unicode), never Malayalam spelled in English letters.\n"
-        "- NEVER write a number, price, percentage, date or phone number that does\n"
-        "  not appear word for word in the text above. If the shop did not give a\n"
-        "  figure, write the line without one. An invented figure ruins a printed\n"
-        "  poster and the whole alternative will be thrown away.\n"
-        "- Do not write a phone number at all. The app adds the shop's own.\n"
-        '- Anything under "Must stay exactly as written" is copied character for\n'
-        "  character, including spacing and punctuation.\n"
-        "- Poster lines are short. A headline is at most five words.\n"
-        "- You are writing words only. You never describe or draw a picture.\n"
-    ),
-    "poster-layout": (
-        "You are laying out a print poster for a shop in Kerala.\n"
-        "\n"
-        "Occasion: {{occasion}}\n"
-        "Headline: {{headline}}\n"
-        "Offer: {{offer}}\n"
-        "Phone: {{phone}}\n"
-        "Tone: {{tone}}\n"
-        "\n"
-        "Return ONLY a JSON object, no prose and no code fence, shaped like:\n"
-        '{"blocks": [{"id": "headline", "text": "...", "x": 0.08, "y": 0.1,\n'
-        '  "width": 0.84, "size": "large", "weight": "bold", "align": "centre"}]}\n'
-        "\n"
-        "Rules:\n"
-        "- x, y and width are fractions of the canvas between 0 and 1.\n"
-        "- size is one of: small, medium, large, huge.\n"
-        "- Keep every block between 0.06 and 0.94 so trimming cannot cut it.\n"
-        "- Order blocks top to bottom in reading order.\n"
-        "- Copy the supplied text EXACTLY. Do not translate, correct or "
-        "re-spell it, and never invent new wording.\n"
-        "- Never describe an image and never place text into a picture. You are "
-        "choosing positions only."
-    ),
-    "poster-artwork": (
-        "A photographic background for a print poster.\n"
-        "\n"
-        "Subject: {{subject}}\n"
-        "Style: {{style}}\n"
-        "Colours: {{palette}}\n"
-        "Aspect: {{aspect}}\n"
-        "\n"
-        "Leave calm, uncluttered space in the upper and lower thirds where text "
-        "will be placed over it.\n"
-        "Absolutely no lettering, no words, no numbers and no logos anywhere in "
-        "the image."
+        "- Describe the picture only. Do not repeat the words back, do not\n"
+        "  suggest wording, and do not mention fonts or type sizes.\n"
+        "- This is for a printing and advertising shop in Kerala. Keep the\n"
+        "  imagery plausible for that, not generic stock photography.\n"
+        "- No prose around your answer, no heading, no code fence.\n"
     ),
     "photo-edit": (
         "Edit this photograph.\n"
@@ -204,7 +136,18 @@ def validate(scope: str, body: str) -> list[str]:
 
 
 def seed_defaults() -> None:
-    """Insert the shipped templates once, without disturbing edits."""
+    """Insert the shipped templates once, without disturbing edits.
+
+    Also clears out **shipped** templates for scopes that no longer exist. When
+    `poster-layout`, `poster-copy` and `poster-artwork` were retired (ADR-034)
+    their seeded rows stayed behind in every database that had already run,
+    listed by `/settings/prompts` under a scope the screen has no dropdown entry
+    for and no default left to restore.
+
+    Only `is_default` rows go. A template the operator wrote themselves is
+    theirs, even if the feature it was for is gone — deleting it to tidy up
+    would be a poor trade, and it costs one row to keep.
+    """
     with db.cursor() as cur:
         for scope, body in SEEDS.items():
             cur.execute(
@@ -213,6 +156,11 @@ def seed_defaults() -> None:
                 "ON CONFLICT(scope, name) DO NOTHING",
                 (scope, body, _now()),
             )
+        placeholders = ",".join("?" * len(SCOPE_KEYS))
+        cur.execute(
+            f"DELETE FROM prompts WHERE is_default = 1 AND scope NOT IN ({placeholders})",
+            tuple(SCOPE_KEYS),
+        )
 
 
 def describe_scopes() -> list[dict[str, Any]]:

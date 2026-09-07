@@ -362,6 +362,9 @@ for, and why the grid shows every row rather than only the suspicious ones.
 
 ## ADR-019 · Posters are SVG, and the backend never rasterises Malayalam
 
+> **Superseded by ADR-034 (2026-09-06).** Kept as written; the reasoning below
+> is still the record of why it was decided, and of what ADR-034 gave up.
+
 **Date:** 2026-08-23
 **Context:** The Phase 4 exit gate asks for text that is sharp **and editable**.
 It also has to be Malayalam, which needs complex-script shaping — reordering the
@@ -391,6 +394,9 @@ shop's workflow actually wants it.
 ---
 
 ## ADR-020 · DOM text boxes, not Fabric.js
+
+> **Superseded by ADR-034 (2026-09-06).** Kept as written; the reasoning below
+> is still the record of why it was decided, and of what ADR-034 gave up.
 
 **Date:** 2026-08-23
 **Context:** ARCHITECTURE.md locked Fabric.js v6 for the poster canvas. Building
@@ -535,6 +541,9 @@ they may be wrong too.
 
 ## ADR-027 · A design style owns both the prompt and the text colours
 
+> **Superseded by ADR-034 (2026-09-06).** Kept as written; the reasoning below
+> is still the record of why it was decided, and of what ADR-034 gave up.
+
 **Date:** 2026-08-23
 **Context:** The poster screen asked for the copy *and* a separate "Picture of…"
 description. The operator wrote the poster twice and nothing made the two halves
@@ -638,6 +647,9 @@ spend; and the cost quote counted rows that would never reach the model.
 
 ## ADR-030 · The AI may write the poster's words, and may never write its digits
 
+> **Superseded by ADR-034 (2026-09-06).** Kept as written; the reasoning below
+> is still the record of why it was decided, and of what ADR-034 gave up.
+
 **Date:** 2026-08-31
 **Context:** ROADMAP Phase 4 says posters start "with plain templates and no AI at
 all", and `backend/api/posters.py` says "No AI here". The operator's report is that
@@ -681,6 +693,9 @@ real call.
 
 ## ADR-031 · A layout is data the app draws, never a description the model draws
 
+> **Superseded by ADR-034 (2026-09-06).** Kept as written; the reasoning below
+> is still the record of why it was decided, and of what ADR-034 gave up.
+
 **Date:** 2026-09-02
 **Context:** Nineteen written art-direction templates were offered as poster styles,
 with a seven-step algorithm for choosing between them. The algorithm is sound. Every
@@ -693,7 +708,8 @@ ratio, a reserved zone stated as a percentage, one alignment axis per zone, a ca
 shapes and colours — as a **layout preset**: local data, seeded in code beside
 `CANVAS_PRESETS`, drawn by `render_svg`. Reject the templates as prompts. **A shape
 the app can draw exactly is never asked of an image model.** Full specification in
-[POSTER_LAYOUTS.md](POSTER_LAYOUTS.md).
+`POSTER_LAYOUTS.md` — deleted with this ADR's supersession, and recoverable from
+git history if the layout presets are ever wanted again.
 **Reasoning:** Text in the picture cannot be edited, cannot be trusted to be spelled
 right, and cannot be Malayalam — which removes the shop's only real advantage over
 Canva (ADR-019, ADR-020). It would also be refused on save: `styles.validate()`
@@ -725,6 +741,200 @@ SQLite because a hand-edited prompt is recoverable and a hand-edited geometry
 misprints silently. One new style variable, `{{reserve}}`, which means a preset must
 be chosen *before* the artwork is generated. No new dependency, no schema migration.
 Phase 4's exit gate is unaffected and unmet — the real print still decides the margin.
+
+## ADR-032 · The tool ships a vocabulary, and stops asking the operator for one
+
+**Date:** 2026-09-05
+**Context:** The review grid told the operator to add a glossary entry whenever it met
+a cell it could not verify — every short cell, and every print term. On a price list,
+which is nothing but short product names, that fired on almost every row. The advice
+was also unactionable at the moment it appeared: the operator is mid-sheet, and the
+answer they are being asked for is not a client preference at all. `Standee` has one
+right Malayalam, and it is the same for every client this shop has.
+
+**Decision:** Bundle an offline English → Malayalam dictionary as a **third
+translation layer**, below the corrections memory and the client glossary and above
+the model. Delete the two "add a glossary entry" notes. Precedence, and none of it is
+arbitrary — each layer outranks the next because it is more specifically the
+operator's own answer:
+
+1. **corrections memory** — the cell this operator approved, on this shop's work (ADR-029)
+2. **client glossary** — this client's locked wording
+3. **word library** — a headword the shop ships, right for anyone
+4. **model** — a guess
+
+Two files, because they are two different kinds of thing. `en-ml.tsv.gz` is 59,027
+headwords folded from the Olam dataset (ODbL 1.0). `trade-en-ml.tsv` is ~90 lines of
+the shop's own vocabulary, hand-checked, plain text, and it **wins** wherever the two
+disagree.
+
+**Reasoning:** The overlay is not a nicety. Olam is a general dictionary and it is
+confidently wrong about this trade: it renders `flex` as മടക്കുക — "to fold" — `card`
+as തടിച്ച കടലാസ്, and it has never heard of `standee`, `matte`, `visiting card` or
+`vinyl` at all. Shipping Olam alone would have replaced a nagging tool with one that
+quotes the wrong product, which is worse. The overlay is also where the old
+`_TRADE_TERMS` frozenset went: the same list, now carrying an answer instead of
+raising a flag, and deliberately not duplicated back into `translate.py`.
+
+A **whole cell** only, and this is the boundary that keeps the claim honest. A
+dictionary holds root words and cannot inflect a Malayalam sentence, so looking words
+up inside one and substituting them would emit uninflected roots in a row — readable
+as a word list, wrong as Malayalam, and it would print that way. A cell that is *entirely* trade terms and
+numbers — `Flex banner`, `Art card 300 gsm`, `6x4 feet` — is **composed** from them
+directly. A cell that is only partly covered goes to the model **untouched**.
+
+That last part was learned the hard way and is worth recording. Trade terms were first
+handled by masking, the way glossary terms are. Masking works for the handful of terms
+one client's glossary holds; handed ~110 terms that occur in nearly every cell it broke
+badly, because `glossary.py` says in its own header that **nothing survives every
+time**. `Flex banner` masked to `X1X X0X` — a cell containing nothing but markers,
+still sent to a 57M model to be mangled. Measured output, all of it bound for a
+client's spreadsheet:
+
+    Flex banner          → ഫ്ലക്സ് 0X ബാനർ      (raw marker debris)
+    6x4 feet             → 6x4X അടി             (marker fused to the size)
+    Total amount payable → എക്സ്1തുക ...        (marker transliterated to എക്സ്)
+    300 gsm matte        → 300 ജിഎസ്എംമാറ്റ്     (no space between terms)
+
+Composition has no markers to lose, so none of that is reachable. It is safe only
+because of what is in the overlay: loanwords and units in a noun phrase, where
+Malayalam keeps English word order. It would not be safe over a general dictionary,
+which is why the composable list is the curated ~110 and never the whole library —
+also a speed decision, since 59,000 regexes per cell would turn a 33,000-cell sheet
+into an afternoon.
+
+Entries that read as *definitions* are never used as answers. Olam explains as well as
+translates and the two are indistinguishable until they print — `Product` comes back as
+ഫാക്ടറിയിൽ നിർമ്മിച്ച വസ്തു, "an item manufactured in a factory". True, and useless as
+a column header. A primary more than four words long for a short headword falls through
+to the model instead; 3,374 of the 59,059 entries are excluded this way.
+
+**Evidence:** Five of the six measured failures in NEXT.md 1.6 no longer reach the
+model. `Standee`, `Brochure`, `Visiting Card` and `Product` are answered outright;
+`300 gsm matte` is composed as 300 + ജിഎസ്എം + മാറ്റ്, so "mathematics" is not
+reachable. Measured on a 20-row price list: 14 of 20 cells answered without the model,
+none carrying debris. The golden fixture asserts this directly now, which is a stronger
+guarantee than the flag it replaces — the bad output in its second column can no longer
+be produced at all.
+
+**Consequences, including the one that is a loss.** `Focus Digitals` is the sixth, and
+it is now **unflagged**. It is a proper noun, no dictionary will hold it, and the
+short-cell warning that used to catch it is gone. It is covered the first time the
+operator corrects it (ADR-029) and not before. That gap is written into
+`tests/golden/translate_flags.tsv` as an expected `gap` row rather than quietly
+dropped, and a future change that closes it will fail that test and have to say so.
+
+The claim this feature makes is **consistency, not accuracy**. A term the shop uses
+repeatedly is now identical on every sheet, forever, offline and free. A sentence is
+still a machine translation and the review grid is still mandatory. Saying otherwise
+would contradict PRD.md, which already states that new sentences need human eyes.
+
+No new dependency — `gzip` is stdlib and the spreadsheet path reuses `openpyxl`. One
+new table, `dictionary_overrides`, holding a **diff** rather than a copy, so refreshing
+the dataset brings 59,000 new answers without discarding the handful the operator has
+fixed. 1.7 MB on a 112 GB SSD.
+
+## ADR-033 · A name is written by sound, by rule, on the machine
+
+**Date:** 2026-09-05
+**Context:** A co-operative bank's member list is names, guardian names, house
+names and addresses — almost entirely proper nouns. A *translation* model has to
+find meaning, so handed one it invents. Measured on a real sheet and recorded in
+`verify.py`: `ELAVUNKAL VEEDU,VADASERIKARA` came back as "യൂക്കാലിപ്റ്റസ്"
+(Eucalyptus), and `THOPPIL VEEDU,UTHIMOODU P.O,` came back carrying a fabricated
+"retrieved on June 2, 2019" citation. Those are not spelling errors.
+
+That already had one answer — the paid Claude check (ADR-028) — and the
+instruction it sends is *"a person, house or place is written by sound in
+Malayalam script, never translated for meaning."* A rule can do that offline and
+for nothing, which is what the rest of this feature promises.
+
+**Decision:** `features/translit.py`, a rule-based English → Malayalam
+transliterator, applied to **columns the operator ticks**. It sits second in the
+precedence order, under the corrections memory only:
+
+    memory > names > glossary > dictionary > model
+
+Names outrank the glossary and the library deliberately: the operator ticked
+that column, so a cell in it is a person or a place, and no amount of coverage
+makes ഏലക്കായ the right answer for a member called Cardamom.
+
+**Reasoning — why the operator ticks it.** Writing a real word by sound is
+exactly as wrong as translating a name, so the cost of guessing runs both ways
+and there is no safe default. Detection from the *values* was tried and dropped:
+on a member list every column is unknown words in title case, including the ones
+holding occupations and account types. Only the heading is read, and only to
+**pre-tick** a suggestion — `Name`, `House name`, `Place`, `Guardian` and the
+rest of `_NAME_HEADERS`. On the sheets this shop actually receives that is one
+glance rather than four decisions.
+
+**The heading is not a name.** Ticking a column exempts its topmost cell, and
+that is not a detail: spelled by sound, `Name` came back as നമെ and `Place` as
+പ്ലകെ, sitting at the top of the column the client reads first. Those words are
+in the library instead.
+
+**Consequences, and the honest limit.** Romanised Malayalam is close to exact —
+`Thoppil` → തൊപ്പിൽ, `Elavunkal Veedu` → എലവുങ്കൽ വീട് — because the spelling
+already encodes the sound. English orthography does not: `Focus` comes out
+ഫൊകുസ് rather than ഫോക്കസ്, and English marks no vowel length, so `Menon` is
+മെനൊൻ where a person would write മേനോൻ. Recognisable, and not what a careful
+human would type. Those are the cells the corrections memory is for — fix once,
+right forever (ADR-029), and a fixed name outranks the rule from then on.
+
+This closes the `Focus Digitals` gap ADR-032 recorded, but only for a *ticked*
+column. A proper noun loose in a product column is still the model's guess.
+
+No new dependency. One new form field on `POST /excel/translate`, absent by
+default, so a `frontend/dist` older than this server behaves exactly as before.
+
+## ADR-034 · The AI draws the whole poster, and the app stops setting type
+
+**Date:** 2026-09-06
+**Supersedes:** ADR-019, ADR-020, ADR-027, ADR-030, ADR-031.
+**Context:** The operator has a finished set of poster-design prompts that
+already produce the layout and the look they want. Against that, the in-app
+designer — canvas editor, layout presets, design styles, SVG export, roughly
+8,000 lines — is a slower route to a worse poster.
+**Decision:** Delete it. The poster tab becomes: paste tagged copy (`main`, `h1`,
+`h2`), optionally add a reference picture, pick one of the operator's designs
+from `data/poster_prompts/`, and Gemini draws the finished poster. Then
+regenerate, or describe a change and have it applied to that same image.
+
+**What this trades away, stated plainly because it is not small.**
+
+*Malayalam will be misspelled.* ADR-019 did not merely assert this, it measured
+it: with no Raqm or HarfBuzz, ``കേരളം`` rendered with its ``േ`` sign after the
+``ക`` instead of before it, and every conjunct broken. An image model does no
+better. The app drew text itself precisely so this shop could produce Malayalam
+posters that no international design tool could — that advantage is now gone.
+
+*Nothing is editable.* ADR-019's deliverable was SVG with real `<text>` elements
+so a typo was a text edit in CorelDRAW. The deliverable is now a raster. A wrong
+word means generating again.
+
+*Digits are no longer protected.* ADR-030 forbade the AI from writing any figure
+the operator had not typed, because an invented price ruins a printed poster.
+The words are inside the picture now, so that rule cannot be enforced — only
+asked for in the prompt.
+
+**How the risk is handled instead.** It is not hidden. The screen shows the copy
+as typed beside every generated poster, with a warning that the app cannot check
+the words and that Malayalam in particular will often be wrong. That check is
+now the operator's, and QC.md says so.
+
+**Reasoning:** The operator was shown each of these costs before choosing, and
+chose. The prompts are theirs, the shop is theirs, and a tool nobody reaches for
+is worth less than one that occasionally needs a second look. Recording the
+trade is the job here — not relitigating it.
+
+**Consequences:** `features/styles.py`, `api/styles.py`, the SVG renderer, the
+layout planner, the copy writer and their screens are gone, with their tests and
+POSTER_LAYOUTS.md. The `poster_styles` table is dropped from the schema but not
+from anyone's database. The retired spend features — `poster-artwork`,
+`poster-layout`, `poster-copy` — stay valid names so the shop's own spend history
+still renders. Designs are files, not rows, so the operator edits them in any
+text editor and a new one needs no restart. No new dependency. Phase 5's exit
+gate is unchanged and still unmet: one real call has still never been made.
 
 ## ADR-010 · Docs before code
 

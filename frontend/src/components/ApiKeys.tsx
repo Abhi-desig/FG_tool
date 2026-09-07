@@ -107,8 +107,9 @@ export function ApiKeys() {
       <div>
         <h2 className="text-lg font-semibold">API keys</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Only the poster artwork and photo editing features use these. Everything else
-          works offline with no key at all.
+          Paste a key below and press Save. Only the poster designer, photo editing and
+          the optional Malayalam check use these — the Malayalam converter, image tools
+          and Excel translation all work offline with no key at all.
         </p>
       </div>
 

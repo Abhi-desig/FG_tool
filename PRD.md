@@ -50,9 +50,8 @@ story 1 alone.
 > glossary that locks approved terms, and review every row side by side before I accept it.
 
 **5 · AI photo editor + poster designer**
-> As the operator, I generate poster artwork with AI while my app renders every word as a real,
-> editable, correctly-spelled text layer — so I can produce Malayalam posters no international
-> design tool can.
+> As the operator, I paste the poster's words, pick one of my own designs, and get a finished
+> poster back in one step — then change it in plain language until it is right.
 
 ## Success metrics
 
@@ -65,7 +64,7 @@ The product is working when these are true — not when the features merely run.
 | 2 | Upscaler | Completes on the shop PC without exhausting 12 GB RAM |
 | 3 | Background remover | Output is usable at 300 DPI without manual cleanup on a typical client photo |
 | 4 | Translator | Glossary terms are never mistranslated twice; the review grid surfaces a deliberately planted error |
-| 5 | Posters | A Malayalam poster exports at 300 DPI with text sharp and editable — not rasterised |
+| 5 | Posters | A poster the shop would actually send to a client comes back within two or three attempts, and the operator has read every word on it |
 | — | Cost | Features 1–4 cost ₹0/month, forever. Feature 5 stays inside ₹2,000/month |
 | — | Speed | The operator reaches for this tool instead of doing the job manually |
 
@@ -86,8 +85,13 @@ Written down so the scope cannot drift, and so nothing here gets promised to a c
 - Undo genuine motion blur. Upscaling invents detail from low resolution; it cannot un-shake a camera
 - Translate perfectly without review. The glossary makes *repeated* terms reliable; new sentences
   still need human eyes, which is why the review grid is mandatory and not optional
-- Have AI write Malayalam text into an image. It is unreliable at this. The app draws all text
-  itself — this limitation is the source of the shop's advantage over Canva
+- **Spell Malayalam correctly on a generated poster.** Image models do not shape complex scripts:
+  measured, `കേരളം` came back with its vowel sign on the wrong side and every conjunct broken. The
+  app used to draw all text itself for exactly this reason; ADR-034 traded that away for the
+  operator's own prompt-driven designs, deliberately and with the cost stated. **Every word on a
+  generated poster must be read before it is printed** — the app cannot check them
+- Edit a word on a finished poster. It is a picture, not a document. A typo means generating again,
+  and CorelDRAW cannot correct it
 
 ## Known caveat to disclose
 
