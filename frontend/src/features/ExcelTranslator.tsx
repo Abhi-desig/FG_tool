@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 
-import { JobProgress } from "@/components/JobProgress"
 import { CategoricalApproval } from "@/components/CategoricalApproval"
+import { JobProgress } from "@/components/JobProgress"
 import { NameColumns } from "@/components/NameColumns"
 import { WordLibrary } from "@/components/WordLibrary"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -33,6 +33,7 @@ import {
   listClients,
   startTranslate,
 } from "@/lib/api"
+import { saveFile } from "@/lib/saveFile"
 
 /**
  * Where the last-used client is remembered.
@@ -218,12 +219,10 @@ export function ExcelTranslator() {
         remember,
         clientId: clientId === "none" ? null : Number(clientId),
       })
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement("a")
-      link.href = url
-      link.download = (file?.name ?? "sheet").replace(/\.xlsx?$/i, "") + "-malayalam.xlsx"
-      link.click()
-      URL.revokeObjectURL(url)
+      saveFile(
+        blob,
+        (file?.name ?? "sheet").replace(/\.xlsx?$/i, "") + "-malayalam.xlsx",
+      )
       toast.success("Exported", {
         description: remembered
           ? `Formatting and formulas untouched. ${remembered} correction${

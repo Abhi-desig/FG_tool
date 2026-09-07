@@ -917,3 +917,37 @@ def test_the_operators_correction_beats_the_transliteration() -> None:
         for row in db.get_corrections(None, limit=500, offset=0):
             if row["source"] == "Anil Kumar":
                 db.delete_correction(int(row["id"]))
+
+
+@needs_engine
+def test_the_exported_file_is_a_real_workbook() -> None:
+    """The operator reported a download that would not open in Excel.
+
+    The server was never at fault — this asserts that, so a future report is
+    diagnosed on the right side of the wire. The bug was in the browser: the
+    blob URL was revoked on the same tick as the click, before the download had
+    read it, so a truncated file landed on disk with a correct name. See
+    `frontend/src/lib/saveFile.ts`.
+    """
+    started = client.post("/api/excel/translate", files=upload()).json()
+    done = wait_for(started["id"])
+    final = {r["key"]: r["translation"] for r in done["result"]["rows"]}
+
+    response = client.post(
+        "/api/excel/export", json={"job_id": started["id"], "translations": final}
+    )
+    assert response.status_code == 200
+
+    # A real .xlsx is a ZIP. `PK\x03\x04` is the only proof that matters.
+    assert response.content[:4] == b"PK\x03\x04", "not a zip, so not a workbook"
+    assert len(response.content) == int(response.headers["content-length"])
+    assert response.headers["content-type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert ".xlsx" in response.headers["content-disposition"]
+
+    # And it opens, with the formulas and numbers the export promised to keep.
+    book = load_workbook(io.BytesIO(response.content))
+    sheet = book[book.sheetnames[0]]
+    assert sheet["C2"].value == "=B2*2", "a formula was rewritten"
+    assert sheet["B2"].value == 180.5, "a number was rewritten"
