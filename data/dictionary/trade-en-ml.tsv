@@ -93,7 +93,10 @@ trim	ട്രിം
 # ഫാക്ടറിയിൽ നിർമ്മിച്ച വസ്തു, "an item manufactured in a factory". True, and
 # useless as a column header on a quotation.
 amount	തുക
+average	ശരാശരി
 code	കോഡ്
+sl no	ക്രമ നമ്പർ
+serial no	ക്രമ നമ്പർ
 customer	ഉപഭോക്താവ്
 date	തീയതി
 description	വിവരണം
@@ -108,6 +111,12 @@ qty	എണ്ണം
 rate	നിരക്ക്
 size	വലുപ്പം	സൈസ്
 total	ആകെ	മൊത്തം
+subtotal	ഉപആകെ
+grand total	ആകെ മൊത്തം
+balance	ബാക്കി
+salary	ശമ്പളം
+remarks	കുറിപ്പുകൾ
+status	സ്ഥിതി
 
 # --- what a member list is made of ----------------------------------------
 # The headings of the sheets the shop is actually handed. They sit at the top of
@@ -131,6 +140,51 @@ place	സ്ഥലം
 post office	പോസ്റ്റ് ഓഫീസ്
 signature	ഒപ്പ്
 village	ഗ്രാമം
+
+# --- departments and job words --------------------------------------------
+# Measured on a real employee sheet: Olam renders `IT` as നേരത്തേപറഞ്ഞകാര്യം —
+# the pronoun "it" — `Operations` as ആക്രമണങ്ങൾ (military attacks), and `Driver`
+# as the long stick for hitting a golf ball. The right word is usually in Olam's
+# alternatives, but nothing tells us which, so these are decided here.
+accountant	അക്കൗണ്ടന്റ്
+administration	ഭരണവിഭാഗം
+analyst	അനലിസ്റ്റ്
+department	വിഭാഗം
+designation	പദവി
+driver	ഡ്രൈവർ
+engineer	എൻജിനീയർ
+executive	എക്സിക്യൂട്ടീവ്
+finance	ധനകാര്യം
+human resources	ഹ്യൂമൻ റിസോഴ്സ്
+it	ഐടി
+legal	നിയമവിഭാഗം
+manager	മാനേജർ
+marketing	മാർക്കറ്റിംഗ്
+officer	ഓഫീസർ
+operations	ഓപ്പറേഷൻസ്
+payroll	പേറോൾ
+procurement	പ്രൊക്യൂർമെന്റ്
+receptionist	റിസപ്ഷനിസ്റ്റ്
+sales	വിൽപ്പന
+staff	സ്റ്റാഫ്
+supervisor	സൂപ്പർവൈസർ
+support	പിന്തുണ
+trainer	പരിശീലകൻ
+warehouse	വെയർഹൗസ്
+designer	ഡിസൈനർ
+writer	എഴുത്തുകാരൻ
+security	സെക്യൂരിറ്റി
+assistant	അസിസ്റ്റന്റ്
+lead	ലീഡ്
+team	ടീം
+content	കണ്ടന്റ്
+data	ഡാറ്റ
+network	നെറ്റ്‌വർക്ക്
+product	ഉൽപ്പന്നം
+business	ബിസിനസ്
+customer	കസ്റ്റമർ
+office	ഓഫീസ്
+store	സ്റ്റോർ
 
 # --- units ----------------------------------------------------------------
 # Taken from `_UNIT_WORDS` in backend/features/translate.py, which is the form

@@ -362,6 +362,15 @@ export interface VerifyQuote {
   is_estimate: boolean
 }
 
+/** What a column holds. Only FREE_TEXT ever reaches the model (ADR-035). */
+export type ColumnClass =
+  | "PERSON_NAME"
+  | "ADDRESS"
+  | "CODE"
+  | "NUMERIC_DATE"
+  | "CATEGORICAL"
+  | "FREE_TEXT"
+
 export interface SheetColumn {
   /** "Sheet!C" — what the translate call is given back. */
   key: string
@@ -370,8 +379,16 @@ export interface SheetColumn {
   header: string
   count: number
   sample: string[]
-  /** A suggestion to pre-tick, never a decision already taken. */
-  looks_like_names: boolean
+  /** The suggested class. A suggestion, never a decision already taken. */
+  cls: ColumnClass
+  /** Why, in words the operator can act on. */
+  why: string
+}
+
+export interface CategoricalColumn {
+  key: string
+  header: string
+  values: { source: string; suggested: string; approved: boolean }[]
 }
 
 export interface SheetInfo {
@@ -388,8 +405,15 @@ export interface SheetInfo {
   from_glossary?: number
   /** Cells the bundled word library answers outright. Free and offline too. */
   from_dictionary?: number
-  /** Every column with text in it, and which look like people and places. */
+  /** Every column with text in it, its suggested class, and why. */
   columns?: SheetColumn[]
+  classes?: ColumnClass[]
+  /** How many distinct strings each route would take. */
+  routed?: Record<string, number>
+  /** Cells nothing could answer, which will be left in English for review. */
+  unresolved?: number
+  /** Per categorical column, the values to approve once. */
+  categorical?: CategoricalColumn[]
   /** What is actually left for the model, and what the quote is based on. */
   to_translate?: number
   verify?: VerifyQuote
@@ -409,6 +433,17 @@ export interface ReviewRow {
   from_dictionary?: boolean
   /** In a column marked as names, so written by sound rather than translated. */
   from_name?: boolean
+  /** Which route answered this cell. */
+  cls?: ColumnClass
+  /** Nothing could answer it; the English is shown and nothing is guessed. */
+  unresolved?: boolean
+  /** What the rules would have said. Offered, never presented as the answer. */
+  suggestion?: string
+  /** The model's own confidence, and how far its four beams disagreed. */
+  score?: number | null
+  divergence?: number | null
+  /** What the round-trip model read the Malayalam back as. */
+  back_translation?: string
   lost_terms: string[]
   /** `problems` then `checks`, flat — kept for anything reading the old shape. */
   warnings: string[]
@@ -455,6 +490,8 @@ export interface TranslationResult {
   from_dictionary?: number
   /** Rows written by sound because they sit in a column marked as names. */
   from_name?: number
+  unresolved?: number
+  by_class?: Record<string, number>
   /** False when the sheet was translated with no glossary in force. */
   glossary_applied: boolean
   glossary_terms: number
@@ -553,8 +590,8 @@ export function startTranslate(
   options: {
     checkWithClaude?: boolean
     overBudgetOk?: boolean
-    /** "Sheet!C" keys whose cells are people and places, not words. */
-    nameColumns?: string[]
+    /** "Sheet!C" -> class, for every column the operator changed or confirmed. */
+    columnClasses?: Record<string, ColumnClass>
   } = {},
 ): Promise<Job> {
   const form = new FormData()
@@ -564,8 +601,12 @@ export function startTranslate(
   // unaffected by the ordinary offline path.
   if (options.checkWithClaude) form.append("check_with_claude", "true")
   if (options.overBudgetOk) form.append("over_budget_ok", "true")
-  if (options.nameColumns?.length) {
-    form.append("name_columns", options.nameColumns.join(","))
+  const classes = Object.entries(options.columnClasses ?? {})
+  if (classes.length) {
+    form.append(
+      "column_classes",
+      classes.map(([key, cls]) => `${key}=${cls}`).join(","),
+    )
   }
   return upload<Job>("/api/excel/translate", form)
 }
@@ -696,6 +737,17 @@ export function forgetJobCorrections(
   return request("/api/corrections/forget-job", {
     method: "POST",
     body: JSON.stringify({ job_id: jobId }),
+  })
+}
+
+/** Lock a categorical column's vocabulary into the client glossary. */
+export function approveCategorical(
+  clientId: number,
+  pairs: { source_term: string; target_term: string }[],
+): Promise<{ terms: GlossaryTerm[]; count: number }> {
+  return request("/api/excel/categorical/approve", {
+    method: "POST",
+    body: JSON.stringify({ client_id: clientId, pairs }),
   })
 }
 

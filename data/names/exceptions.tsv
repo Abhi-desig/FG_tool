@@ -1,0 +1,85 @@
+# Names the transliteration rules get wrong, and the spelling the shop uses.
+#
+# Consulted BEFORE the rules, always. A name here is never derived; it is looked
+# up. This is where a correction lands when the operator fixes a PERSON_NAME cell
+# in the review grid, so the file grows with use (ADR-035).
+#
+# Why it has to exist: English spelling does not mark vowel length, so the rules
+# cannot know that `Menon` is മേനോൻ and not മെനൊൻ. No amount of rule-tuning
+# fixes that — the information is simply not in the input.
+#
+# One token per line, lowercased, tab-separated:
+#     latin <TAB> malayalam
+#
+# Lines starting with # are ignored. Keep it sorted.
+
+# --- given names ----------------------------------------------------------
+abdul	അബ്ദുൾ
+aiswarya	ഐശ്വര്യ
+ann	ആൻ
+anil	അനിൽ
+anjali	അഞ്ജലി
+arun	അരുൺ
+ashraf	അഷ്‌റഫ്
+babu	ബാബു
+beevi	ബീവി
+chandran	ചന്ദ്രൻ
+das	ദാസ്
+deepa	ദീപ
+devi	ദേവി
+divya	ദിവ്യ
+fathima	ഫാത്തിമ
+george	ജോർജ്
+haritha	ഹരിത
+james	ജെയിംസ്
+jose	ജോസ്
+joseph	ജോസഫ്
+krishnan	കൃഷ്ണൻ
+kumar	കുമാർ
+kurian	കുര്യൻ
+lakshmi	ലക്ഷ്മി
+manoj	മനോജ്
+mary	മേരി
+mathew	മാത്യു
+meera	മീര
+mohammed	മുഹമ്മദ്
+mohan	മോഹൻ
+nikhil	നിഖിൽ
+nithya	നിത്യ
+philip	ഫിലിപ്പ്
+praveen	പ്രവീൺ
+prasad	പ്രസാദ്
+priya	പ്രിയ
+rahman	റഹ്മാൻ
+rahul	രാഹുൽ
+raj	രാജ്
+ramesh	രമേശ്
+raveendran	രവീന്ദ്രൻ
+reshma	രേഷ്മ
+rijo	റിജോ
+sajeev	സജീവ്
+sara	സാറ
+shalini	ഷാലിനി
+sneha	സ്നേഹ
+sunil	സുനിൽ
+suresh	സുരേഷ്
+thomas	തോമസ്
+varghese	വർഗീസ്
+vijayan	വിജയൻ
+vishnu	വിഷ്ണു
+vivek	വിവേക്
+
+# --- surnames and family names --------------------------------------------
+menon	മേനോൻ
+nair	നായർ
+pillai	പിള്ള
+
+# --- honorifics -----------------------------------------------------------
+# No trailing dot on these. Source punctuation is preserved exactly, so the
+# operator's own `Dr.` supplies it — an entry of `ഡോ.` produced `ഡോ..`
+dr	ഡോ
+mr	മി
+mrs	ശ്രീമതി
+ms	കുമാരി
+shri	ശ്രീ
+smt	ശ്രീമതി

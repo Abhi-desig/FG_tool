@@ -144,6 +144,43 @@ robustness · **P3** operator-visible polish · **P4** process.
 - [ ] Re-run the same sheet: the corrected name comes back from memory, badged
       **from memory**, not re-spelled by the rule.
 
+### D1b · Column kinds *(ADR-035)*
+
+**This is the step that decides whether a sheet comes out right.** Only *ordinary
+wording* reaches the translation model; everything else is routed without it.
+
+- [ ] Drop a member list → **What is in each column?** appears above Translate, with
+      a kind and a plain reason for every column, and the sample values under each.
+- [ ] Every kind looks right. A `Name` column must be **People's names**, a
+      `House Name` column **Houses and places**, `Phone Number` **Numbers and
+      codes**, a `Department` column of ten repeated values **A short repeated list**.
+- [ ] Change one → a *changed from…* badge appears and the line above updates how
+      many columns would reach the model.
+- [ ] Translate. Name rows read as real Malayalam names, not meanings — check five
+      against the English. `Anjali Menon` must be അഞ്ജലി മേനോൻ, never a word.
+- [ ] **Phone numbers, dates and salaries are byte-identical.** Compare five against
+      the original file. Export refuses outright if any differ.
+- [ ] A name the tool does not know carries a note asking you to read the spelling.
+      Correct one, export, then re-run the same sheet: it comes back your way, and
+      `data/names/exceptions.tsv` has gained a line.
+- [ ] Correct a *place* the same way and re-run: every address holding that place is
+      fixed, not just the one cell.
+- [ ] A `Department`-style column offers its values for approval once. Approve them,
+      then re-run: they come from the glossary and are never machine-translated.
+- [ ] A row the model rewrote instead of translating shows **left in English** with
+      a reason. It must never show a confident guess instead.
+
+### D1c · The Malayalam nobody has checked
+
+- [ ] **Run this once, with someone who reads Malayalam:**
+
+      uv run python scripts/review_sheet.py
+
+      337 terms, English beside each, grouped by what they are for. Mark the
+      wrong ones and correct the `.tsv` files in `data/`. Until this is done the
+      shop is printing words no Malayalam reader has approved — see ADR-032 and
+      ADR-035, which both say so.
+
 ### D2 · Word library *(ADR-032)*
 
 - [ ] **Read `data/dictionary/trade-en-ml.tsv` once, end to end.** ~90 lines. It is the

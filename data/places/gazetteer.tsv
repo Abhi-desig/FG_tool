@@ -1,0 +1,93 @@
+# Kerala places, with the spelling the shop uses.
+#
+# Consulted FIRST when decomposing an address, before the structural glossary and
+# before transliteration (ADR-035). A place in here is looked up, never derived —
+# `Ernakulam` is എറണാകുളം, which the rules would spell എർനകുലം.
+#
+# Districts and the larger towns are complete. Panchayats and small villages are
+# not, and cannot be: there are over a thousand and no offline list of them ships
+# with a licence this shop can use. An unlisted place falls through to
+# transliteration, which is the correct behaviour — and when the operator fixes
+# one in the review grid it is written back here.
+#
+#     english <TAB> malayalam <TAB> kind
+#
+# `kind` is one of: district, city, town. It is not used for routing; it is there
+# so the operator can see why a token matched.
+#
+# Lines starting with # are ignored. Keep it sorted within each group.
+
+# --- the fourteen districts -----------------------------------------------
+alappuzha	ആലപ്പുഴ	district
+ernakulam	എറണാകുളം	district
+idukki	ഇടുക്കി	district
+kannur	കണ്ണൂർ	district
+kasaragod	കാസർകോട്	district
+kollam	കൊല്ലം	district
+kottayam	കോട്ടയം	district
+kozhikode	കോഴിക്കോട്	district
+malappuram	മലപ്പുറം	district
+palakkad	പാലക്കാട്	district
+pathanamthitta	പത്തനംതിട്ട	district
+thiruvananthapuram	തിരുവനന്തപുരം	district
+thrissur	തൃശ്ശൂർ	district
+wayanad	വയനാട്	district
+
+# --- names the same districts also go by ----------------------------------
+alleppey	ആലപ്പുഴ	district
+calicut	കോഴിക്കോട്	district
+cannanore	കണ്ണൂർ	district
+quilon	കൊല്ലം	district
+trichur	തൃശ്ശൂർ	district
+trivandrum	തിരുവനന്തപുരം	district
+
+# --- cities and larger towns ----------------------------------------------
+aluva	ആലുവ	town
+angamaly	അങ്കമാലി	town
+attingal	ആറ്റിങ്ങൽ	town
+chalakudy	ചാലക്കുടി	town
+changanassery	ചങ്ങനാശ്ശേരി	town
+chengannur	ചെങ്ങന്നൂർ	town
+cherthala	ചേർത്തല	town
+edappally	ഇടപ്പള്ളി	town
+guruvayoor	ഗുരുവായൂർ	town
+irinjalakuda	ഇരിഞ്ഞാലക്കുട	town
+kakkanad	കാക്കനാട്	town
+kalamassery	കളമശ്ശേരി	town
+kanhangad	കാഞ്ഞങ്ങാട്	town
+kayamkulam	കായംകുളം	town
+kochi	കൊച്ചി	city
+kodungallur	കൊടുങ്ങല്ലൂർ	town
+kothamangalam	കോതമംഗലം	town
+kunnamkulam	കുന്നംകുളം	town
+manjeri	മഞ്ചേരി	town
+mavelikkara	മാവേലിക്കര	town
+muvattupuzha	മൂവാറ്റുപുഴ	town
+nedumbassery	നെടുമ്പാശ്ശേരി	town
+neyyattinkara	നെയ്യാറ്റിൻകര	town
+ottappalam	ഒറ്റപ്പാലം	town
+pala	പാലാ	town
+paravur	പരവൂർ	town
+perinthalmanna	പെരിന്തൽമണ്ണ	town
+perumbavoor	പെരുമ്പാവൂർ	town
+ponnani	പൊന്നാനി	town
+punalur	പുനലൂർ	town
+shoranur	ഷൊർണൂർ	town
+thalassery	തലശ്ശേരി	town
+thodupuzha	തൊടുപുഴ	town
+thripunithura	തൃപ്പൂണിത്തുറ	town
+tirur	തിരൂർ	town
+vadakara	വടകര	town
+varkala	വർക്കല	town
+vypin	വൈപ്പിൻ	town
+
+# --- outside Kerala, but common on these sheets ---------------------------
+bangalore	ബംഗളൂരു	city
+bengaluru	ബംഗളൂരു	city
+chennai	ചെന്നൈ	city
+coimbatore	കോയമ്പത്തൂർ	city
+delhi	ഡൽഹി	city
+hyderabad	ഹൈദരാബാദ്	city
+kerala	കേരളം	district
+mangalore	മംഗളൂരു	city
+mumbai	മുംബൈ	city

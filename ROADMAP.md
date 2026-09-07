@@ -166,6 +166,20 @@ NLLB-200 would have been the obvious engine and is **rejected on licence**
 
 ---
 
+### What ADR-035 changed about Phase 3
+
+Measured on a real employee sheet, the pipeline returned ~50 wrong cells and
+flagged 2. Almost every text cell was being sent to a sentence-level model,
+including the names and house names it can only invent meanings for. Columns are
+now classified before anything is translated and only ordinary wording reaches
+the model. Provable errors on the frozen gold set fell from 54 to 0.
+
+**Still open:** 99 of those 131 cells are translated but unverifiable by rule, and
+the Malayalam in the bundled name, place and trade assets needs one read by a
+Malayalam speaker. Both are recorded in ADR-035.
+
+---
+
 ## Phase 4 · Posters ← rebuilt, unproven against the live API
 
 **Rebuilt on 2026-09-06 (ADR-034), and the golden rule it was built on is gone.**

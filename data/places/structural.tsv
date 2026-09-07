@@ -1,0 +1,65 @@
+# The scaffolding of a Kerala address: the words that say what a part *is*.
+#
+# An address is decomposed, never translated (ADR-035). These are the tokens that
+# carry structure rather than identity — `Road`, `PO`, `Near` — and they have
+# fixed Malayalam. Everything that is not one of these and not in the gazetteer
+# is a place name, and place names are written by sound.
+#
+# Matched case-insensitively, longest phrase first, after the gazetteer.
+#
+#     english <TAB> malayalam
+#
+# Lines starting with # are ignored. Keep it sorted within each group.
+
+# --- what kind of place ---------------------------------------------------
+apartment	അപ്പാർട്ട്മെന്റ്
+building	കെട്ടിടം
+bungalow	ബംഗ്ലാവ്
+colony	കോളനി
+complex	കോംപ്ലക്സ്
+flat	ഫ്ലാറ്റ്
+floor	നില
+gardens	ഗാർഡൻസ്
+house	വീട്
+lane	ഇടവഴി
+nagar	നഗർ
+road	റോഡ്
+street	തെരുവ്
+tower	ടവർ
+veedu	വീട്
+veettil	വീട്ടിൽ
+villa	വില്ല
+
+# --- administrative -------------------------------------------------------
+block	ബ്ലോക്ക്
+corporation	കോർപ്പറേഷൻ
+dist	ജില്ല
+district	ജില്ല
+gram panchayat	ഗ്രാമ പഞ്ചായത്ത്
+municipality	മുനിസിപ്പാലിറ്റി
+panchayat	പഞ്ചായത്ത്
+po	പി.ഒ
+post	പോസ്റ്റ്
+post office	പോസ്റ്റ് ഓഫീസ്
+state	സംസ്ഥാനം
+taluk	താലൂക്ക്
+village	ഗ്രാമം
+
+# --- relative position ----------------------------------------------------
+above	മുകളിൽ
+back side	പിൻവശം
+behind	പിന്നിൽ
+beside	അരികിൽ
+junction	ജംഗ്ഷൻ
+near	സമീപം
+opp	എതിർവശം
+opposite	എതിർവശം
+via	വഴി
+
+# --- the labels a form prints ---------------------------------------------
+address	വിലാസം
+door no	വാതിൽ നമ്പർ
+house no	വീട്ടു നമ്പർ
+landmark	അടയാളം
+pin	പിൻ
+pin code	പിൻ കോഡ്

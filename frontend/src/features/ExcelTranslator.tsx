@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { JobProgress } from "@/components/JobProgress"
+import { CategoricalApproval } from "@/components/CategoricalApproval"
 import { NameColumns } from "@/components/NameColumns"
 import { WordLibrary } from "@/components/WordLibrary"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -20,6 +21,7 @@ import {
 import {
   ApiError,
   type ClientRow,
+  type ColumnClass,
   type Job,
   type ReviewRow,
   type ReviewSummary,
@@ -62,12 +64,19 @@ export function ExcelTranslator() {
   const [file, setFile] = useState<File | null>(null)
   const [info, setInfo] = useState<SheetInfo | null>(null)
   /**
-   * Columns holding people and places. Seeded from the server's suggestion the
-   * first time a sheet is inspected, then owned by the operator — re-inspecting
-   * on a client change must not silently undo their ticks.
+   * What each column holds. Seeded from the server's suggestion the first time a
+   * sheet is inspected, then owned by the operator — the sheet is re-inspected
+   * on every client change, and re-seeding there would undo their answer under
+   * them (ADR-035).
    */
-  const [nameColumns, setNameColumns] = useState<Set<string>>(new Set())
+  const [columnClasses, setColumnClasses] = useState<Record<string, ColumnClass>>({})
   const seededFor = useRef<string | null>(null)
+  /**
+   * Bumped to force a re-inspect of the same file. Approving a categorical
+   * column changes what the sheet costs and what the panel should still show,
+   * and `setFile(file)` cannot trigger that — it is the same object reference.
+   */
+  const [refresh, setRefresh] = useState(0)
   const [clients, setClients] = useState<ClientRow[]>([])
   const [clientId, setClientId] = useState<string>(rememberedClient)
   const [job, setJob] = useState<Job | null>(null)
@@ -128,7 +137,7 @@ export function ExcelTranslator() {
     setRows([])
     setEdits({})
     setInfo(null)
-    setNameColumns(new Set())
+    setColumnClasses({})
     seededFor.current = null
     setFile(next)
     setCheckWithClaude(false)
@@ -154,16 +163,12 @@ export function ExcelTranslator() {
       .then((next) => {
         if (inspectRun.current !== run) return
         setInfo(next)
-        // Once per file — `accept` clears this, nothing else does. The sheet is
-        // re-inspected on every client change, and re-seeding there would undo
-        // the operator's own ticks under them.
+        // Once per file — `accept` clears this, nothing else does.
         if (seededFor.current === null) {
           seededFor.current = file.name
-          setNameColumns(
-            new Set(
-              (next.columns ?? [])
-                .filter((c) => c.looks_like_names)
-                .map((c) => c.key),
+          setColumnClasses(
+            Object.fromEntries(
+              (next.columns ?? []).map((c) => [c.key, c.cls]),
             ),
           )
         }
@@ -173,7 +178,7 @@ export function ExcelTranslator() {
         setInfo(null)
         setError(err instanceof ApiError ? err.message : "Could not read that sheet.")
       })
-  }, [file, clientId])
+  }, [file, clientId, refresh])
 
   const chooseClient = useCallback((next: string) => {
     setClientId(next)
@@ -198,13 +203,13 @@ export function ExcelTranslator() {
         await startTranslate(file, clientId === "none" ? null : Number(clientId), {
           checkWithClaude,
           overBudgetOk,
-          nameColumns: [...nameColumns],
+          columnClasses,
         }),
       )
     } catch (err: unknown) {
       setError(err instanceof ApiError ? err.message : "Could not start translating.")
     }
-  }, [file, clientId, checkWithClaude, overBudgetOk, nameColumns])
+  }, [file, clientId, checkWithClaude, overBudgetOk, columnClasses])
 
   const download = useCallback(async () => {
     if (!job) return
@@ -369,11 +374,22 @@ export function ExcelTranslator() {
       {/* Asked before Translate, because it changes what the run does — and
           hidden once the grid exists, where it would only be confusing. */}
       {file && info && !job && (
-        <NameColumns
-          columns={info.columns ?? []}
-          picked={nameColumns}
-          onChange={setNameColumns}
-        />
+        <>
+          <NameColumns
+            columns={info.columns ?? []}
+            picked={columnClasses}
+            onChange={setColumnClasses}
+          />
+          {/* Only shown while there is something left to approve. Once locked,
+              these values come from the glossary and this panel disappears. */}
+          <CategoricalApproval
+            columns={info.categorical ?? []}
+            clientId={clientId === "none" ? null : Number(clientId)}
+            // Re-inspect so the approved values leave this panel and turn up in
+            // the "already known" count above.
+            onApproved={() => setRefresh((n) => n + 1)}
+          />
+        </>
       )}
 
       {file && info && (
@@ -694,7 +710,8 @@ export function ExcelTranslator() {
                       {(row.glossary_terms.length > 0 ||
                         row.from_memory ||
                         row.from_dictionary ||
-                        row.from_name) && (
+                        row.from_name ||
+                        row.unresolved) && (
                         <div className="mt-1 flex flex-wrap gap-1">
                           {row.glossary_terms.map((t) => (
                             <Badge key={t} variant="outline" className="text-[11px]">
@@ -719,6 +736,11 @@ export function ExcelTranslator() {
                           {row.from_name && (
                             <Badge variant="secondary" className="text-[11px]">
                               written by sound
+                            </Badge>
+                          )}
+                          {row.unresolved && (
+                            <Badge variant="outline" className="text-[11px]">
+                              left in English
                             </Badge>
                           )}
                         </div>

@@ -1,0 +1,152 @@
+# Gold set: every cell of a real employee sheet, before and after ADR-035.
+#
+# FROZEN, and symmetric: the same cells are judged in both runs by the same
+# rules, so the comparison means something.
+#
+# A verdict is only ever given where there is EVIDENCE:
+#   untranslated       output is identical to the English input
+#   leaked English     Latin in the output that was not in the source
+#   means “...”        a mistranslation measured and back-translated in session
+#   no Malayalam       nothing in the Malayalam block at all
+#   a number...        the source carries no words, so identity is correct
+#   refused            marked UNRESOLVED; excluded, it is not an answer
+#
+# Everything else is `unknown` and EXCLUDED from both metrics — including
+# every transliteration. Whether തെക്കെവീട്ടിൽ is the right spelling of
+# Thekkeveettil is not a thing a rule can settle, and an earlier draft of this
+# file scored them `ok` by construction, which made the after-metric measure
+# itself and report a perfect score. Those rows are what a Malayalam reader
+# still has to mark.
+#
+# cell	source	before	before_verdict	before_flagged	after	after_verdict	after_flagged	after_basis
+Employee Details!A1	Sl No	സ്ലൈഡ് ഇല്ലswitzerland. kgm	wrong	False	"ഇല്ല	unknown	False	needs a Malayalam reader
+Employee Details!B1	Name	പേര്	unknown	False	പേര്	unknown	False	needs a Malayalam reader
+Employee Details!B10	Lakshmi Devi	ലഖ്മി ദേവിpakistan. kgm	wrong	False	ലക്ഷ്മി ദേവി	unknown	False	needs a Malayalam reader
+Employee Details!B11	Vishnu Prasad	വിഷ്ണുപുരാണം	wrong	False	വിഷ്ണു പ്രസാദ്	unknown	False	needs a Malayalam reader
+Employee Details!B12	Aiswarya Raj	അസുരിയാ രാജൻ	unknown	False	ഐശ്വര്യ രാജ്	unknown	False	needs a Malayalam reader
+Employee Details!B13	George Mathew	ജോർജ് മാഥോ	unknown	False	ജോർജ് മാത്യു	unknown	False	needs a Malayalam reader
+Employee Details!B14	Nithya Suresh	നിത്യ ഉറപ്പായും	wrong	False	നിത്യ സുരേഷ്	unknown	False	needs a Malayalam reader
+Employee Details!B15	Sajeev Kumar	സാജിദ് കുമാർ	unknown	False	സജീവ് കുമാർ	unknown	False	needs a Malayalam reader
+Employee Details!B16	Reshma Jose	ഷീമ ജോസ് വീണ്ടും തുടങ്ങുക	wrong	True	രേഷ്മ ജോസ്	unknown	False	needs a Malayalam reader
+Employee Details!B17	Praveen Menon	പ്രിവെൻ മെൻ	unknown	False	പ്രവീൺ മേനോൻ	unknown	False	needs a Malayalam reader
+Employee Details!B18	Sara Kurian	സാറ കുറിയൻ	unknown	False	സാറ കുര്യൻ	unknown	False	needs a Malayalam reader
+Employee Details!B19	Manoj Pillai	മാൻജ പാകി	unknown	False	മനോജ് പിള്ള	unknown	False	needs a Malayalam reader
+Employee Details!B2	Anjali Menon	അഞ്ജലി മെനോൺ	unknown	False	അഞ്ജലി മേനോൻ	unknown	False	needs a Malayalam reader
+Employee Details!B20	Deepa Nair	കടുംനാട്ടstar name	wrong	False	ദീപ നായർ	unknown	False	needs a Malayalam reader
+Employee Details!B21	Rijo Varghese	റിയോ വാർഗാസ്colombia. kgm	wrong	False	റിജോ വർഗീസ്	unknown	False	needs a Malayalam reader
+Employee Details!B22	Haritha Mohan	ഹരീഷ് മുഹൻ	unknown	False	ഹരിത മോഹൻ	unknown	False	needs a Malayalam reader
+Employee Details!B23	Abdul Rahman	അബ് ശാലോം	unknown	False	അബ്ദുൾ റഹ്മാൻ	unknown	False	needs a Malayalam reader
+Employee Details!B24	Meera Ramesh	മീരാ രമേശ്	unknown	False	മീര രമേശ്	unknown	False	needs a Malayalam reader
+Employee Details!B25	Vivek Chandran	വിവെക് ചന്ദൻ	unknown	False	വിവേക് ചന്ദ്രൻ	unknown	False	needs a Malayalam reader
+Employee Details!B26	Ann Mary	ആൻ മേരി	unknown	False	ആൻ മേരി	unknown	False	needs a Malayalam reader
+Employee Details!B27	Sunil Das	സൺ ഡേസ്star name	wrong	False	സുനിൽ ദാസ്	unknown	False	needs a Malayalam reader
+Employee Details!B28	Priya Vijayan	പ്രീയാ വിജയൻ	unknown	False	പ്രിയ വിജയൻ	unknown	False	needs a Malayalam reader
+Employee Details!B29	Nikhil Raveendran	നിഖിൽ രവീന്ദ്രൻ	unknown	False	നിഖിൽ രവീന്ദ്രൻ	unknown	False	needs a Malayalam reader
+Employee Details!B3	Rahul Nair	രാഹുൽ നയീർ	unknown	False	രാഹുൽ നായർ	unknown	False	needs a Malayalam reader
+Employee Details!B30	Shalini Babu	ശാലിനി ബാബുafrica. kgm	wrong	False	ഷാലിനി ബാബു	unknown	False	needs a Malayalam reader
+Employee Details!B31	Thomas Philip	തോമസ് ഫിലിപ്പ്	unknown	False	തോമസ് ഫിലിപ്പ്	unknown	False	needs a Malayalam reader
+Employee Details!B35	Note: All names, house names, phone numbers are fictional.	കുറിപ്പ്: എല്ലാ പേരുകളും, ഭവനനാമങ്ങളും, ഫോൺ നമ്പറുകളും കഥാനാമങ്ങളാണ്.	unknown	False	Note: All names, house names, phone numbers are fictional.	refused	True	left in English on purpose
+Employee Details!B4	Fathima Beevi	ഫാത്തിമ ബീവിusa. kgm	wrong	False	ഫാത്തിമ ബീവി	unknown	False	needs a Malayalam reader
+Employee Details!B5	Joseph Thomas	ജോസഫ് തോമസ്	unknown	False	ജോസഫ് തോമസ്	unknown	False	needs a Malayalam reader
+Employee Details!B6	Sneha Pillai	സ്നെഹ പില്ലിpuertorico. kgm	wrong	False	സ്നേഹ പിള്ള	unknown	False	needs a Malayalam reader
+Employee Details!B7	Arun Kumar	അരുൺ കുമാർ	unknown	False	അരുൺ കുമാർ	unknown	False	needs a Malayalam reader
+Employee Details!B8	Divya Krishnan	ദ്വിപൎണ്ണൻ കൃഷ്ണൻ	wrong	False	ദിവ്യ കൃഷ്ണൻ	unknown	False	needs a Malayalam reader
+Employee Details!B9	Mohammed Ashraf	മുഹമ്മദ് അസ്രാഫ്	unknown	False	മുഹമ്മദ് അഷ്‌റഫ്	unknown	False	needs a Malayalam reader
+Employee Details!C1	House Name	വീട്ട്‌പേര്	unknown	False	വീട്ട്‌പേര്	unknown	False	needs a Malayalam reader
+Employee Details!C10	Kizhakkeveettil	കിഷെക്വിറ്റസ്കെയിറ്റ്greece_ prefection. kgm	wrong	True	കിഴക്കെവീട്ടിൽ	unknown	True	needs a Malayalam reader
+Employee Details!C11	Mundakkal House	മംഗളോദയം	wrong	False	മുൻദക്കൽ വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C12	Chirayil Veedu	ചിറയിൽ വെഡ്യൂ	unknown	False	ചിരയിൽ വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C13	Palliparambil	പത്മനാഭപിള്ള	wrong	False	പല്ലിപരമ്ബിൽ	unknown	True	needs a Malayalam reader
+Employee Details!C14	Thundathil	തണ്ടെൽcolombia. kgm	wrong	False	തുൻദതിൽ	unknown	True	needs a Malayalam reader
+Employee Details!C15	Kunnathu House	കന്നട ഹൌസ്	unknown	False	കുന്നതു വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C16	Vettikkal	വെറ്റിക്കാട്	unknown	False	വെട്ടിക്കൽ	unknown	True	needs a Malayalam reader
+Employee Details!C17	Ambalathara	അംബാരാത്രി	unknown	False	അമ്ബലതര	unknown	True	needs a Malayalam reader
+Employee Details!C18	Karottu Veedu	കർട്ടൻ വീഡ്യൂ	unknown	False	കരൊട്ടു വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C19	Pattarumadam	പത്മനാഭൻ	unknown	False	പട്ടരുമദം	unknown	True	needs a Malayalam reader
+Employee Details!C2	Thekkeveettil	ദ്വിതീയ	wrong	False	തെക്കെവീട്ടിൽ	unknown	True	needs a Malayalam reader
+Employee Details!C20	Elamthuruthil	ഏലാംകുളം	unknown	False	എലമ്തുരുതിൽ	unknown	True	needs a Malayalam reader
+Employee Details!C21	Muttathil House	മുറ്റത്ത് ഹൌസ്	unknown	False	മുട്ടതിൽ വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C22	Charuvila Veedu	ഷാർവോലാ വീഡ്	unknown	False	ചരുവില വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C23	Perumthottam	പെറുമിൻതോട്ടം	unknown	False	പെരുമ്തൊട്ടം	unknown	True	needs a Malayalam reader
+Employee Details!C24	Nalanchira House	നാലാച്ചിറ ഹൌസ്	unknown	False	നലൻചിര വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C25	Puthuval	ഫൂഹാൽ	unknown	False	പുതുവൽ	unknown	True	needs a Malayalam reader
+Employee Details!C26	Kalathil Veedu	കലാത്ത് വെദെ	unknown	False	കലതിൽ വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C27	Vazhakkala House	വാച്യാലയം	unknown	False	വഴക്കല വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C28	Thattarambalam	ആറ്റംബാൽfrance. kgm	wrong	False	തട്ടരമ്ബലം	unknown	True	needs a Malayalam reader
+Employee Details!C29	Konchira Veedu	കൊച്ചിറ വീഡ്	unknown	False	കൊൻചിര വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C3	Puthenpurayil	പൂരകം	wrong	False	പുതെൻപുരയിൽ	unknown	True	needs a Malayalam reader
+Employee Details!C30	Poovathur House	പോവോതർ ഹൌസ്	unknown	False	പൂവതുർ വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C31	Erattayil	എസ്റ്റെയ് ൽgreece_ prefectures. kgm	wrong	True	എരട്ടയിൽ	unknown	True	needs a Malayalam reader
+Employee Details!C4	Kadavil House	കദാവലി ഹൗസ്	unknown	False	കദവിൽ വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C5	Vadakkedath	വാച്യഖണ്ഡം	wrong	False	വദക്കെദത്	unknown	True	needs a Malayalam reader
+Employee Details!C6	Manalil House	മാനിൽ ഹൗസ്	unknown	False	മനലിൽ വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C7	Cheriyathu Veedu	കെരിഹൌവെദെവൌ	unknown	False	ചെരിയതു വീട്	unknown	True	needs a Malayalam reader
+Employee Details!C8	Pallithara	പാൽത്താരworld. kgm	wrong	False	പല്ലിതര	unknown	True	needs a Malayalam reader
+Employee Details!C9	Naduvilekkara	നദുന്ദുലെഖകൎമ്മം	unknown	False	നദുവിലെക്കര	unknown	True	needs a Malayalam reader
+Employee Details!D1	Phone Number	ഫോൺ നമ്പർ	unknown	False	ഫോൺ നമ്പർ	unknown	False	needs a Malayalam reader
+Employee Details!E1	Designation	നാമനിർദ്ദേശം ചെയ്യൽ	unknown	False	പദവി	unknown	False	needs a Malayalam reader
+Employee Details!E10	Receptionist	സനർശകരെ സ്വീകരിക്കാൻ നിയുക്തമായിട്ടുള്ള ആൾ	unknown	False	റിസപ്ഷനിസ്റ്റ്	unknown	False	needs a Malayalam reader
+Employee Details!E11	Data Analyst	ഡാറ്റ യാന്ത്രികമായി	unknown	False	ഡാറ്റ അനലിസ്റ്റ്	unknown	False	needs a Malayalam reader
+Employee Details!E12	Sales Executive	സലസ് എക്സിക്യൂട്ടീവ്	unknown	False	വിൽപ്പന എക്സിക്യൂട്ടീവ്	unknown	False	needs a Malayalam reader
+Employee Details!E13	Finance Manager	ഫിങ്കൻസ് മാനേജർ	unknown	False	ധനകാര്യം മാനേജർ	unknown	False	needs a Malayalam reader
+Employee Details!E14	QA Engineer	ക്യുഎ എൻജിനീയർ	unknown	False	QA എൻജിനീയർ	unknown	False	needs a Malayalam reader
+Employee Details!E15	Driver	ഗോൾഫിൽ പന്തടിക്കാനുള്ള നീണ്ട വടി	wrong	False	ഡ്രൈവർ	unknown	False	needs a Malayalam reader
+Employee Details!E16	HR Executive	HR എക്സിക്യൂട്ടീവ്	unknown	False	HR Executive	refused	True	left in English on purpose
+Employee Details!E17	Marketing Lead	മാർക്ക്ലെഡ്	unknown	False	മാർക്കറ്റിംഗ് ലീഡ്	unknown	False	needs a Malayalam reader
+Employee Details!E18	Legal Advisor	നിയമാവലി	unknown	False	നിയമപരമായ ആഡിറ്റർ	unknown	False	needs a Malayalam reader
+Employee Details!E19	Warehouse Staff	വാന്യഹൗസ് സ്റ്റാഫ്City in Ontario Canada	wrong	True	വെയർഹൗസ് സ്റ്റാഫ്	unknown	False	needs a Malayalam reader
+Employee Details!E2	Sales Executive	സലസ് എക്സിക്യൂട്ടീവ്	unknown	False	വിൽപ്പന എക്സിക്യൂട്ടീവ്	unknown	False	needs a Malayalam reader
+Employee Details!E20	Business Analyst	വ്യാപാരം	unknown	False	ബിസിനസ് അനലിസ്റ്റ്	unknown	False	needs a Malayalam reader
+Employee Details!E21	Sales Manager	സാൽസ് മാനേജർ	unknown	False	വിൽപ്പന മാനേജർ	unknown	False	needs a Malayalam reader
+Employee Details!E22	UI Designer	യുഐ ഡിസൈനർ	unknown	False	UI ഡിസൈനർ	unknown	True	needs a Malayalam reader
+Employee Details!E23	Procurement Officer	പ്രോക്യൂഷൻ ഓഫീസർ	unknown	False	പ്രൊക്യൂർമെന്റ് ഓഫീസർ	unknown	False	needs a Malayalam reader
+Employee Details!E24	Payroll Officer	നികുതി ഓഫീസർ	unknown	False	പേറോൾ ഓഫീസർ	unknown	False	needs a Malayalam reader
+Employee Details!E25	DevOps Engineer	Development എഞ്ചിനീയർ	wrong	False	"ഡിവോപ്സ് എഞ്ചിനീയർ	unknown	False	needs a Malayalam reader
+Employee Details!E26	Customer Support	ഇഷ്ടപ്പെട്ട പിന്തുണ	unknown	False	കസ്റ്റമർ പിന്തുണ	unknown	False	needs a Malayalam reader
+Employee Details!E27	Network Admin	ശൃംഖലാ അഡ്മിൻ	unknown	False	നെറ്റ് വർക്ക് അഡ്മിൻ	unknown	True	needs a Malayalam reader
+Employee Details!E28	Trainer	പരിശീലകൻ	unknown	False	പരിശീലകൻ	unknown	False	needs a Malayalam reader
+Employee Details!E29	Product Manager	നിർമ്മാണ കാര്യസ്ഥൻ	unknown	False	ഉൽപ്പന്നം മാനേജർ	unknown	False	needs a Malayalam reader
+Employee Details!E3	Accountant	കണക്കെഴുത്തുകാരൻ	unknown	False	അക്കൗണ്ടന്റ്	unknown	False	needs a Malayalam reader
+Employee Details!E30	Office Assistant	ഓഫീസ് സഹായി	unknown	False	ഓഫീസ് അസിസ്റ്റന്റ്	unknown	False	needs a Malayalam reader
+Employee Details!E31	Security Officer	സുരക്ഷാ ഓഫീസർ	unknown	False	സെക്യൂരിറ്റി ഓഫീസർ	unknown	False	needs a Malayalam reader
+Employee Details!E4	HR Officer	എച്ച്ആർ ഓഫീസർ	unknown	False	HR ഓഫീസർ	unknown	True	needs a Malayalam reader
+Employee Details!E5	Software Engineer	സോഫ്റ്റ് വെയർ എൻജിനീയർ	unknown	False	സോഫ്റ്റ് വെയർ എൻജിനീയർ	unknown	False	needs a Malayalam reader
+Employee Details!E6	Graphic Designer	ഗ്രാഫിക് ഡിസൈനർ	unknown	False	ഗ്രാഫിക് ഡിസൈനർ	unknown	False	needs a Malayalam reader
+Employee Details!E7	Team Lead	ടീം	unknown	False	ടീം ലീഡ്	unknown	False	needs a Malayalam reader
+Employee Details!E8	Content Writer	രചയിതാവു്	unknown	False	കണ്ടന്റ് എഴുത്തുകാരൻ	unknown	False	needs a Malayalam reader
+Employee Details!E9	Store Manager	സ്റ്റോക്ക് മാനേജർ	unknown	False	സ്റ്റോർ മാനേജർ	unknown	False	needs a Malayalam reader
+Employee Details!F1	Department	പ്രത്യേക പ്രവർത്തനരംഗം	unknown	False	വിഭാഗം	unknown	False	needs a Malayalam reader
+Employee Details!F10	Administration	കാര്യനിർവ്വാഹകസംഘം	wrong	False	Administration	refused	True	left in English on purpose
+Employee Details!F11	IT	നേരത്തേപറഞ്ഞകാര്യം	wrong	False	IT	refused	True	left in English on purpose
+Employee Details!F12	Sales	സാൾസ്star name	wrong	False	Sales	refused	True	left in English on purpose
+Employee Details!F13	Finance	പൊതുധനവിനിമയ ശാസ്ത്രം	wrong	False	Finance	refused	True	left in English on purpose
+Employee Details!F14	IT	നേരത്തേപറഞ്ഞകാര്യം	wrong	False	IT	refused	True	left in English on purpose
+Employee Details!F15	Operations	ആക്രമണങ്ങൾ	wrong	False	Operations	refused	True	left in English on purpose
+Employee Details!F16	Human Resources	മനുഷ്യസഹായം	wrong	False	Human Resources	refused	True	left in English on purpose
+Employee Details!F17	Marketing	ക്രയവിക്രയം	wrong	False	Marketing	refused	True	left in English on purpose
+Employee Details!F18	Legal	നിയമപ്രകാരമുള്ള	unknown	False	Legal	refused	True	left in English on purpose
+Employee Details!F19	Operations	ആക്രമണങ്ങൾ	wrong	False	Operations	refused	True	left in English on purpose
+Employee Details!F2	Sales	സാൾസ്star name	wrong	False	Sales	refused	True	left in English on purpose
+Employee Details!F20	IT	നേരത്തേപറഞ്ഞകാര്യം	wrong	False	IT	refused	True	left in English on purpose
+Employee Details!F21	Sales	സാൾസ്star name	wrong	False	Sales	refused	True	left in English on purpose
+Employee Details!F22	IT	നേരത്തേപറഞ്ഞകാര്യം	wrong	False	IT	refused	True	left in English on purpose
+Employee Details!F23	Operations	ആക്രമണങ്ങൾ	wrong	False	Operations	refused	True	left in English on purpose
+Employee Details!F24	Finance	പൊതുധനവിനിമയ ശാസ്ത്രം	wrong	False	Finance	refused	True	left in English on purpose
+Employee Details!F25	IT	നേരത്തേപറഞ്ഞകാര്യം	wrong	False	IT	refused	True	left in English on purpose
+Employee Details!F26	Support	സംരക്ഷിക്കുക	wrong	False	Support	refused	True	left in English on purpose
+Employee Details!F27	IT	നേരത്തേപറഞ്ഞകാര്യം	wrong	False	IT	refused	True	left in English on purpose
+Employee Details!F28	Human Resources	മനുഷ്യസഹായം	wrong	False	Human Resources	refused	True	left in English on purpose
+Employee Details!F29	Product	ഉൽപ്പന്നം	unknown	False	Product	refused	True	left in English on purpose
+Employee Details!F3	Finance	പൊതുധനവിനിമയ ശാസ്ത്രം	wrong	False	Finance	refused	True	left in English on purpose
+Employee Details!F30	Administration	കാര്യനിർവ്വാഹകസംഘം	wrong	False	Administration	refused	True	left in English on purpose
+Employee Details!F31	Operations	ആക്രമണങ്ങൾ	wrong	False	Operations	refused	True	left in English on purpose
+Employee Details!F4	Human Resources	മനുഷ്യസഹായം	wrong	False	Human Resources	refused	True	left in English on purpose
+Employee Details!F5	IT	നേരത്തേപറഞ്ഞകാര്യം	wrong	False	IT	refused	True	left in English on purpose
+Employee Details!F6	Marketing	ക്രയവിക്രയം	wrong	False	Marketing	refused	True	left in English on purpose
+Employee Details!F7	IT	നേരത്തേപറഞ്ഞകാര്യം	wrong	False	IT	refused	True	left in English on purpose
+Employee Details!F8	Marketing	ക്രയവിക്രയം	wrong	False	Marketing	refused	True	left in English on purpose
+Employee Details!F9	Operations	ആക്രമണങ്ങൾ	wrong	False	Operations	refused	True	left in English on purpose
+Employee Details!G1	Date of Joining	തീയതിയും സമയവും	unknown	True	ചേരുന്ന തീയതി	unknown	True	needs a Malayalam reader
+Employee Details!G32	Total	ആകെ	unknown	False	ആകെ	unknown	False	needs a Malayalam reader
+Employee Details!G33	Average	സുമാർ	wrong	False	ശരാശരി	unknown	False	needs a Malayalam reader
+Employee Details!H1	Salary (INR)	സലാരി (എൻആർ)	unknown	False	ശമ്പളം (എൻആർ	unknown	False	needs a Malayalam reader

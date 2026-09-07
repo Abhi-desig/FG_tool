@@ -67,13 +67,16 @@ FG_Tool/
 │       ├── images.py       Phase 2 — cutout, upscale, DPI calculator
 │       ├── excel.py        Phase 3 — translation + glossary
 │       ├── dictionary.py   Phase 3 — the bundled offline word library
-│       ├── translit.py     Phase 3 — names written by sound, by rule
+│       ├── translit.py     Phase 3 — names and addresses, by rule
+│       ├── columns.py      Phase 3 — what each column holds (ADR-035)
 │       ├── posters.py      Phase 4 — reads the shop's poster designs
 │       └── ai.py           Phase 5 — Gemini client
 │
 ├── data/
 │   ├── maps/               vendored ML-TTKarthika.map
 │   ├── poster_prompts/     the shop's own poster designs, one file each
+│   ├── names/              exceptions.tsv — names the rules cannot derive
+│   ├── places/             gazetteer.tsv + structural.tsv, for addresses
 │   └── dictionary/         en-ml.tsv.gz (Olam, ODbL) + trade-en-ml.tsv (ours)
 │
 ├── frontend/
