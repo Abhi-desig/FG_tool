@@ -840,6 +840,12 @@ export interface PosterDesign {
   key: string
   name: string
   description: string
+  /**
+   * The shape the design asks for, e.g. `"4:5"`. Empty when it does not say,
+   * in which case nothing is forced. Sent to Google as a request parameter and
+   * not only written in the prompt, because a ratio in prose drifts.
+   */
+  aspect: string
 }
 
 export interface PosterCopy {
@@ -854,6 +860,12 @@ export function posterDesigns(): Promise<{
   /** Shown in the empty state, so the operator knows where their files go. */
   folder: string
   tags: CopyTag[]
+  /**
+   * Whether the server will accept a pinned style. The operator never chooses
+   * one — the model does — so the override only appears when someone started
+   * the server with `DEV_TOOLS=true`.
+   */
+  dev_tools: boolean
 }> {
   return request("/api/posters/designs")
 }
@@ -871,17 +883,22 @@ export function parsePosterCopy(copy: string): Promise<{
 
 export function generatePoster(body: {
   copy: string
-  design: string
   reference?: File | null
   batch?: boolean
   overBudgetOk?: boolean
+  /**
+   * Pin the style instead of letting the model choose. Developer control only —
+   * the server refuses it unless it was started with `DEV_TOOLS=true`, rather
+   * than ignoring it, so a pinned run can never be mistaken for agreement.
+   */
+  forceStyle?: string
 }): Promise<AiResult> {
   const form = new FormData()
   form.append("copy", body.copy)
-  form.append("design", body.design)
   if (body.reference) form.append("reference", body.reference)
   form.append("batch", body.batch === false ? "false" : "true")
   if (body.overBudgetOk) form.append("over_budget_ok", "true")
+  if (body.forceStyle) form.append("force_style", body.forceStyle)
   return upload<AiResult>("/api/posters/generate", form)
 }
 
@@ -968,7 +985,14 @@ export interface AiResult {
   budget: Budget
   image?: string
   media_type?: string
-  layout?: { blocks: Record<string, unknown>[] }
+  /**
+   * Which style the model chose, and the one line it gave for why. Present on
+   * poster generation only, and only when the reply named a style that really
+   * exists — an empty `style` with a warning means the poster is fine but
+   * cannot be reproduced from the log.
+   */
+  style?: string
+  style_reason?: string
 }
 
 export function listKeys(): Promise<{

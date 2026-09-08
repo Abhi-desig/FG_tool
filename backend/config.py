@@ -20,6 +20,16 @@ HOST = "127.0.0.1"
 PORT = int(os.getenv("PORT", "8000"))
 OPEN_BROWSER = os.getenv("OPEN_BROWSER", "true").lower() not in {"false", "0", "no"}
 
+# Developer controls, off for the operator. Today this is the poster style
+# override: the poster screen chooses a style on its own, and the only way to
+# exercise the other eight is to pin one deliberately (ADR-037). It is a
+# spending control as much as a UI one — each pinned run is a real charge — so
+# it stays off unless someone sets it, and the route refuses the parameter
+# rather than ignoring it.
+#
+#     DEV_TOOLS=true uv run python -m backend.main
+DEV_TOOLS = os.getenv("DEV_TOOLS", "false").lower() in {"true", "1", "yes"}
+
 # Models live on the big drive, not the 112 GB SSD.
 MODELS_DIR = Path(os.getenv("MODELS_DIR", ROOT / "models")).expanduser()
 

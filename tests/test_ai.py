@@ -13,6 +13,7 @@ spend.
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from typing import Any
 
 import pytest
@@ -166,12 +167,12 @@ def test_only_successful_calls_count_as_spend(monkeypatch: pytest.MonkeyPatch) -
     before = ai.budget_status()["total_paise"]
 
     fake(monkeypatch, response=FakeResponse([FakePart(data=b"PNGDATA")]))
-    ai.generate_poster("example-festival", {"main": "Onam Sale"}, batch=True)
+    ai.generate_poster({"main": "Onam Sale"}, batch=True)
     after_success = ai.budget_status()
     assert after_success["total_paise"] == before + 600
 
     fake(monkeypatch, raises=RuntimeError("safety: blocked"))
-    ai.generate_poster("example-festival", {"main": "Onam Sale"}, batch=True)
+    ai.generate_poster({"main": "Onam Sale"}, batch=True)
     after_failure = ai.budget_status()
     assert after_failure["total_paise"] == after_success["total_paise"]
     assert after_failure["failed_runs"] >= 1
@@ -196,7 +197,7 @@ def test_budget_fraction_never_exceeds_one(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_missing_key_is_explained_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
     db.delete_api_key("GEMINI_API_KEY")
-    result = ai.generate_poster("example-festival", {"main": "Onam Sale"})
+    result = ai.generate_poster({"main": "Onam Sale"})
     assert result.ok is False
     assert "Settings" in (result.error or "")
 
@@ -204,7 +205,7 @@ def test_missing_key_is_explained_not_raised(monkeypatch: pytest.MonkeyPatch) ->
 def test_no_charge_recorded_when_the_key_is_missing() -> None:
     db.delete_api_key("GEMINI_API_KEY")
     before = ai.budget_status()["runs"] + ai.budget_status()["failed_runs"]
-    ai.generate_poster("example-festival", {"main": "Onam Sale"})
+    ai.generate_poster({"main": "Onam Sale"})
     after = ai.budget_status()["runs"] + ai.budget_status()["failed_runs"]
     assert after == before, "a call that never left the machine is not a run"
 
@@ -223,14 +224,14 @@ def test_sdk_errors_become_plain_english(
     monkeypatch: pytest.MonkeyPatch, raised: Exception, expected: str
 ) -> None:
     fake(monkeypatch, raises=raised)
-    result = ai.generate_poster("example-festival", {"main": "Onam Sale"})
+    result = ai.generate_poster({"main": "Onam Sale"})
     assert result.ok is False
     assert expected in (result.error or "").lower()
 
 
 def test_empty_response_is_not_charged(monkeypatch: pytest.MonkeyPatch) -> None:
     fake(monkeypatch, response=FakeResponse([FakePart(text="sorry")]))
-    result = ai.generate_poster("example-festival", {"main": "Onam Sale"})
+    result = ai.generate_poster({"main": "Onam Sale"})
     assert result.ok is False
     assert result.cost_paise == 0
     assert "no poster" in (result.error or "").lower()
@@ -249,7 +250,7 @@ def test_missing_instruction_never_reaches_the_api(monkeypatch: pytest.MonkeyPat
 def test_synthid_watermark_is_disclosed(monkeypatch: pytest.MonkeyPatch) -> None:
     """PRD.md lists this as something to tell a client about."""
     fake(monkeypatch, response=FakeResponse([FakePart(data=b"PNG")]))
-    result = ai.generate_poster("example-festival", {"main": "Onam Sale"})
+    result = ai.generate_poster({"main": "Onam Sale"})
     assert any("SynthID" in w for w in result.warnings)
 
 
@@ -402,7 +403,7 @@ def test_over_budget_refuses_a_paid_call(monkeypatch: pytest.MonkeyPatch) -> Non
     client = image_client(monkeypatch)
     spend(ai.MONTHLY_BUDGET_PAISE + 1)
 
-    result = ai.generate_poster("example-festival", {"main": "Onam Sale"})
+    result = ai.generate_poster({"main": "Onam Sale"})
     assert result.ok is False
     assert "budget" in (result.error or "").lower()
     assert result.cost_paise == 0
@@ -432,16 +433,14 @@ def test_the_operator_can_deliberately_spend_past_the_budget(
     image_client(monkeypatch)
     spend(ai.MONTHLY_BUDGET_PAISE + 1)
 
-    result = ai.generate_poster(
-        "example-festival", {"main": "Onam Sale"}, over_budget_ok=True
-    )
+    result = ai.generate_poster({"main": "Onam Sale"}, over_budget_ok=True)
     assert result.ok is True
 
 
 def test_inside_the_budget_nothing_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     image_client(monkeypatch)
     spend(100)
-    assert ai.generate_poster("example-festival", {"main": "Onam Sale"}).ok is True
+    assert ai.generate_poster({"main": "Onam Sale"}).ok is True
 
 
 # --- auto-repair must not pick a nonsense model (NEXT.md 1.3) -------------
@@ -520,7 +519,7 @@ def test_a_reply_with_no_image_does_not_claim_it_was_free(
     a few rupees; asserting "nothing was charged" here drifts one way.
     """
     image_client(monkeypatch, data=None)
-    result = ai.generate_poster("example-festival", {"main": "Onam Sale"})
+    result = ai.generate_poster({"main": "Onam Sale"})
     assert result.ok is False
     error = (result.error or "").lower()
     assert "nothing was charged" not in error
@@ -571,3 +570,91 @@ def test_friendly_error_is_the_public_name() -> None:
     assert ai.friendly_error(RuntimeError("deadline exceeded")) == ai._friendly(  # noqa: SLF001
         RuntimeError("deadline exceeded")
     )
+
+
+def test_an_improved_shipped_prompt_reaches_a_database_that_already_ran() -> None:
+    """Otherwise a better default only ever helps a fresh install.
+
+    The poster engine's rules live in these seeds (ADR-036). Pinning them is
+    pointless if the shop's own `data.db`, seeded months ago, keeps the old
+    wording forever — and "delete data.db" is not an upgrade path for a machine
+    with nobody to run it.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE prompts SET body = 'stale shipped wording' "
+            "WHERE scope = 'poster-concept' AND is_default = 1"
+        )
+    prompts.seed_defaults()
+    assert prompts.active_prompt("poster-concept")["body"] == prompts.SEEDS["poster-concept"]
+
+
+def test_a_default_the_operator_edited_is_never_overwritten_by_an_update() -> None:
+    """Their wording is theirs, even in the row marked as the shipped default.
+
+    `save_prompt` files the previous body under `prompt_versions` on every
+    change, so an edit leaves a trace — and that trace is what tells the seeder
+    to keep its hands off.
+    """
+    default = next(
+        p for p in prompts.list_prompts("poster-concept") if p["is_default"]
+    )
+    prompts.save_prompt(
+        "poster-concept", default["name"], "my own wording {{main}}", default["id"]
+    )
+
+    prompts.seed_defaults()
+
+    assert prompts.get_prompt(default["id"])["body"] == "my own wording {{main}}"
+
+
+def test_the_poster_change_template_is_editable_like_any_other() -> None:
+    """The freeze clause is long, and the operator has to be able to tune it."""
+    assert "poster-edit" in prompts.SCOPE_KEYS
+    body = prompts.active_prompt("poster-edit")["body"]
+    assert "{{note}}" in body
+    assert prompts.validate("poster-edit", body) == []
+
+
+def test_a_restored_default_still_picks_up_a_later_improvement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A version history is not proof the operator wrote anything.
+
+    This is the case that actually happened. Pressing "Restore default", or a
+    round trip through the editor that changed nothing, files a row in
+    `prompt_versions` while leaving shipped text in place. Treating that as an
+    edit froze the shop's own database on the pre-v1.1 concept prompt, and the
+    only way out was a button nobody knew to press.
+
+    So a body that still matches something this app shipped is the app's to
+    replace, whatever its history says. The retired text is recognised by hash
+    rather than kept in the source, so this test registers its own.
+    """
+    retired = "an older shipped wording {{main}}"
+    monkeypatch.setitem(
+        prompts.SUPERSEDED_SEEDS,
+        "poster-concept",
+        frozenset({sha256(retired.encode("utf-8")).hexdigest()}),
+    )
+
+    default = next(p for p in prompts.list_prompts("poster-concept") if p["is_default"])
+    prompts.save_prompt("poster-concept", default["name"], retired, default["id"])
+    assert prompts.versions(default["id"]), "the setup did not create a version history"
+
+    prompts.seed_defaults()
+
+    assert prompts.get_prompt(default["id"])["body"] == prompts.SEEDS["poster-concept"]
+
+
+def test_the_hash_recorded_for_the_retired_concept_prompt_is_a_real_one() -> None:
+    """A typo'd hash matches nothing and fails silently forever.
+
+    It cannot be checked against the text — that text is deliberately gone —
+    but it can be checked for being a SHA-256 at all, which catches a truncated
+    or mistyped paste.
+    """
+    for scope, digests in prompts.SUPERSEDED_SEEDS.items():
+        assert scope in prompts.SCOPE_KEYS, f"{scope} is not a live scope"
+        for digest in digests:
+            assert len(digest) == 64 and set(digest) <= set("0123456789abcdef")
