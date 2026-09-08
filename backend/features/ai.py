@@ -27,6 +27,7 @@ from typing import Any, Literal
 from backend import db
 from backend.budget import MONTHLY_BUDGET_PAISE, OverBudget, budget_status, ensure_within
 from backend.features import posters, prompts
+from backend.posterspec import check as check_prompt
 
 log = logging.getLogger(__name__)
 
@@ -157,7 +158,12 @@ class AiResult:
     image: bytes | None = None
     media_type: str = "image/png"
     text: str | None = None
-    layout: dict[str, Any] | None = None
+    # Which of the styles the model chose, and the one line it gave for why.
+    # Read out of the same response as the image so a poster can be explained
+    # and reproduced later; empty when the model did not name a valid one
+    # (ADR-037).
+    style: str = ""
+    style_reason: str = ""
     # Alternative sets of poster words, each in English and Malayalam.
     alternatives: list[dict[str, Any]] | None = None
     error: str | None = None
@@ -658,6 +664,64 @@ def edit_photo(
 # misspelled and nothing in the result is editable. Neither is checkable from
 # here — both are said plainly in the UI instead.
 
+# The aspect ratios Google's image models accept. Stated as a **parameter** and
+# not only in the prompt text: a ratio mentioned in prose is advice, and 4:5
+# drifts to square often enough to waste a call (ADR-036). An unlisted value is
+# dropped rather than sent, because a rejected config fails the whole request.
+ASPECT_RATIOS: tuple[str, ...] = (
+    "1:1",
+    "2:3",
+    "3:2",
+    "3:4",
+    "4:3",
+    "4:5",
+    "5:4",
+    "9:16",
+    "16:9",
+    "21:9",
+)
+
+
+def _image_config(aspect: str, want_text: bool = False) -> Any | None:
+    """A request config for a drawing call, or None if there is nothing to ask for.
+
+    `want_text` asks for a text part alongside the image. That is what carries
+    the chosen style back on the auto-selection call — the image models take
+    `response_modalities`, but **not** `response_schema`, so the style arrives
+    as a line of text under a stated contract rather than as validated JSON.
+    Parsing it is `posters.parse_choice`'s job, and an unparseable answer is
+    reported as unknown rather than guessed at (ADR-037).
+    """
+    if aspect and aspect not in ASPECT_RATIOS:
+        log.warning("Ignoring unsupported aspect ratio %r", aspect)
+        aspect = ""
+    if not aspect and not want_text:
+        return None
+    from google.genai import types
+
+    return types.GenerateContentConfig(
+        image_config=types.ImageConfig(aspect_ratio=aspect) if aspect else None,
+        response_modalities=["TEXT", "IMAGE"] if want_text else None,
+    )
+
+
+def nearest_aspect(width: int, height: int) -> str:
+    """The supported ratio closest to an image's real shape.
+
+    Used when changing a poster that already exists. The freeze clause promises
+    the same crop and aspect ratio; sending no ratio at all leaves the model to
+    pick one, which is how a portrait poster comes back square with its type cut
+    off. Compared on the ratio itself rather than by name so a 1024×1280 poster
+    resolves to 4:5 whatever the design said.
+    """
+    if width <= 0 or height <= 0:
+        return ""
+    actual = width / height
+    return min(
+        ASPECT_RATIOS,
+        key=lambda r: abs(actual - (int(r.split(":")[0]) / int(r.split(":")[1]))),
+    )
+
 
 def poster_concept(copy: dict[str, str], over_budget_ok: bool = False) -> AiResult:
     """Turn the poster's words into a visual idea, in text.
@@ -708,27 +772,53 @@ def poster_concept(copy: dict[str, str], over_budget_ok: bool = False) -> AiResu
 
 
 def generate_poster(
-    design_key: str,
     copy: dict[str, str],
     concept: str = "",
     reference: tuple[bytes, str] | None = None,
     batch: bool = True,
     over_budget_ok: bool = False,
+    force_style: str = "",
 ) -> AiResult:
-    """Draw the poster. One design, the copy, and either a concept or a picture."""
+    """Choose a style and draw the poster, in one call.
+
+    The operator supplies copy and nothing else. The model is shown every
+    style's spec, picks the one that fits the words, names its choice in the
+    reply, and draws — so there is one round trip and one charge, and the choice
+    is a field rather than something to infer from the picture (ADR-037).
+
+    `force_style` pins the choice instead, which is how all nine stay testable
+    without hand-writing copy that triggers each one. A pinned style also gets
+    its spec at full length, rather than compressed alongside eight others.
+    """
     model = model_for("poster")
     result = AiResult(ok=False, feature="poster", model=model, batch=batch)
 
+    if not (copy.get("main") or "").strip():
+        result.error = "Write the poster's headline first — there is nothing to set."
+        return result
+
+    available = posters.designs()
     try:
-        text = posters.prompt_for(design_key, copy, concept)
+        if force_style:
+            pinned = posters.design(force_style)
+            text = posters.one_style_prompt(pinned, copy, concept)
+            aspect = pinned.aspect
+        else:
+            pinned = None
+            text = posters.selection_prompt(copy, concept, available)
+            aspect = posters.auto_aspect(available)
     except posters.PosterError as exc:
         result.error = str(exc)
         return result
 
     result.prompt_used = text
 
-    if not (copy.get("main") or "").strip():
-        result.error = "Write the poster's headline first — there is nothing to set."
+    # The engine's own reject list, read before a rupee is spent. Only the digit
+    # check refuses; the rest is shown beside the poster (ADR-036).
+    report = check_prompt(text, copy)
+    result.warnings.extend(report.warnings)
+    if not report.ok:
+        result.error = " ".join(report.refusals)
         return result
 
     try:
@@ -746,7 +836,22 @@ def generate_poster(
         # and the words that follow say what to do with it.
         contents = [types.Part.from_bytes(data=data, mime_type=media_type), text]
 
-    return _draw(result, model, contents, "poster", batch)
+    drawn = _draw(
+        result,
+        model,
+        contents,
+        "poster",
+        batch,
+        _image_config(aspect, want_text=force_style == ""),
+    )
+
+    if pinned is not None:
+        # Nothing was chosen, so nothing is reported as chosen. The style is
+        # known because the operator pinned it, and saying the model picked it
+        # would make the log lie.
+        drawn.style = pinned.key
+        drawn.style_reason = "pinned by the dev override"
+    return drawn
 
 
 def refine_poster(
@@ -755,6 +860,7 @@ def refine_poster(
     note: str,
     batch: bool = False,
     over_budget_ok: bool = False,
+    aspect: str = "",
 ) -> AiResult:
     """Change the poster that was just made, keeping the rest of it.
 
@@ -762,6 +868,12 @@ def refine_poster(
     nearly liked is adjusted rather than replaced. Not batched by default:
     this is the iterating step, and waiting minutes between attempts is what
     stops an operator iterating at all.
+
+    The note is wrapped in the `poster-edit` template rather than a sentence
+    written here. An image model asked to change one thing will happily redraw
+    the scene around it, and what stops that is naming everything that must not
+    move — framing, light, grade, every text element — which is long enough to
+    be worth the operator being able to read and tune it in Settings (ADR-036).
     """
     model = model_for("poster")
     result = AiResult(ok=False, feature="poster", model=model, batch=batch)
@@ -770,31 +882,29 @@ def refine_poster(
         result.error = "Say what should change about the poster."
         return result
 
+    template = prompts.active_prompt("poster-edit")
+    instruction = prompts.render(template["body"], {"note": note.strip()})
+    result.prompt_used = instruction
+
     try:
         check_budget("poster", batch, over_budget_ok)
     except OverBudget as exc:
         result.error = str(exc)
         return result
 
-    instruction = (
-        "Change this poster as described, and change nothing else.\n"
-        "\n"
-        f"Change: {note.strip()}\n"
-        "\n"
-        "Keep the layout, the colours and every word exactly as they are unless "
-        "the change asks otherwise. Do not add any word, number, price, date or "
-        "phone number that is not already on the poster."
-    )
-    result.prompt_used = instruction
-
     from google.genai import types
 
     contents = [types.Part.from_bytes(data=image, mime_type=media_type), instruction]
-    return _draw(result, model, contents, "poster", batch)
+    return _draw(result, model, contents, "poster", batch, _image_config(aspect))
 
 
 def _draw(
-    result: AiResult, model: str, contents: list[Any], role: str, batch: bool
+    result: AiResult,
+    model: str,
+    contents: list[Any],
+    role: str,
+    batch: bool,
+    config: Any | None = None,
 ) -> AiResult:
     """Send a drawing request and unpack the picture.
 
@@ -804,7 +914,13 @@ def _draw(
     billed rather than assumed free.
     """
     try:
-        response = _client().models.generate_content(model=model, contents=contents)
+        # `config` is omitted rather than passed as None: a stub client in the
+        # tests takes the same call, and an unexpected keyword is a failure that
+        # would only show up against the real SDK.
+        extra = {"config": config} if config is not None else {}
+        response = _client().models.generate_content(
+            model=model, contents=contents, **extra
+        )
     except AiError as exc:
         result.error = str(exc)
         return result
@@ -830,7 +946,28 @@ def _draw(
         "Google embeds an invisible SynthID watermark in AI images. It does not "
         "affect printing."
     )
+
+    # The chosen style, out of the text part of this same response. Only looked
+    # for when the caller asked for one — `refine_poster` sends no catalogue, so
+    # a `STYLE:` line there would be the model echoing something invented.
+    if role == "poster" and result.style == "" and _wants_text(config):
+        said = _extract_text(response)
+        result.style, result.style_reason = posters.parse_choice(said)
+        if not result.style:
+            # The poster is real and paid for; only the label is missing. Losing
+            # the poster over an unparseable line would be the worse trade, so
+            # this is a warning and the field stays empty rather than guessed.
+            result.warnings.append(
+                "The model drew the poster but did not say which style it chose, "
+                "so this one cannot be reproduced from the log. What it replied: "
+                f"{said.strip()[:200] or '(nothing)'}"
+            )
     return _record(result)
+
+
+def _wants_text(config: Any | None) -> bool:
+    """Whether this request asked for a text part beside the image."""
+    return bool(config is not None and getattr(config, "response_modalities", None))
 
 
 # --- budget ---------------------------------------------------------------

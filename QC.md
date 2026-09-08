@@ -209,10 +209,12 @@ type. Gemini draws every word into the picture, so nothing here can check the
 spelling and Malayalam will often be wrong. The check below is the only one
 there is, and it is yours.
 
-- [ ] With `data/poster_prompts/` empty of designs, the screen says where to put
-      them and shows the folder path. It does not look broken.
-- [ ] Drop a design file in → it appears in the list **without restarting the server**.
-- [ ] A design file with a typo in its header is skipped and the others still list.
+- [ ] With `data/poster_prompts/` empty, the screen says where to put styles and
+      shows the folder path. It does not look broken.
+- [ ] Drop a style file in → it counts **without restarting the server**.
+- [ ] A style file with a typo in its header is skipped and the others still load.
+- [ ] **There is no style picker on this screen.** The operator pastes copy and
+      presses one button (ADR-037). If a dropdown is visible, the dev flag is on.
 - [ ] Paste `main: … / h1: … / h2: …` → the three lines are read back correctly
       **before** anything is spent. Check `h1` and `h2` are not swapped.
 - [ ] Paste an untagged first line → it is taken as `main`.
@@ -234,6 +236,55 @@ there is, and it is yours.
 - [ ] `Download` saves the poster. Note its pixel size; it is whatever Google
       returned, and there is no upscaling step.
 
+### The engine's rules *(ADR-036)*
+
+- [ ] **The poster comes back 4:5.** This is the whole reason the ratio is sent as
+      a parameter — check the pixel size, because a portrait style returning a
+      square is the failure mode.
+- [ ] Ask for a change → the changed poster has the **same pixel dimensions** as
+      the one you sent. A reshaped poster means the measured ratio did not reach
+      Google.
+- [ ] Ask for one small change ("make the sky darker") → only that changed. The
+      layout, the colours and every word are where they were. If the poster was
+      redrawn, the `poster-edit` freeze clause is not doing its job — read it in
+      Settings.
+- [ ] Write a style that omits its palette line and generate → a note appears
+      **beside the poster** saying so, and the poster is still made. These are
+      notes, not gates.
+- [ ] Put a phone number in `h2` → every digit of it appears on the poster. The
+      app quotes the copy into the prompt itself, so this is structural now
+      rather than checked (ADR-037) — which means the way it fails is a Gemini
+      lettering error, not a missing line. Read it digit by digit.
+- [ ] In Settings, `Poster visual idea` contains the specificity budget and the
+      banned-word list; `Poster change instruction` contains the freeze clause.
+      Both are editable and restorable.
+- [ ] Edit `Poster visual idea`, save, and restart the server → **your wording is
+      still there.** A shipped update must never overwrite an operator's prompt.
+
+### Choosing the style *(ADR-037)*
+
+**One real call is what this section is for.** Everything below the first two
+boxes has only ever been exercised against a fake client.
+
+- [ ] Generate with no style pinned → **`Style chosen: <name>` appears under the
+      poster**, with a one-line reason. If it says nothing and a warning quotes
+      what the model replied instead, the naming contract is not landing — that
+      is the finding, report it rather than regenerating until it works.
+- [ ] The style it picked is a defensible fit for the copy. Try three very
+      different briefs: two words of greeting; a single price; five lines with
+      two figures and a phone number. They should not all get the same style.
+- [ ] Restart with `DEV_TOOLS=true` → a `Pin a style` control appears, listing
+      `Let the model choose` plus all nine.
+- [ ] Pin each of the nine in turn and generate. This is the only way the eight
+      unchosen styles get exercised. **Nine real charges** — do it once,
+      deliberately, and keep the images.
+- [ ] Compare a pinned poster against an auto-selected one in the same style. The
+      selection prompt is ~2400 words against ~320 pinned, and if the auto one is
+      visibly worse then one call is costing quality and the two-call route in
+      ADR-037 is the fix.
+- [ ] With the dev flag **off**, the style control is gone from the screen.
+
+
 ## F · Settings
 
 - [ ] Print defaults: DPI, colour profile, units each save immediately; a failure toasts.
@@ -252,8 +303,8 @@ there is, and it is yours.
 - [ ] AI models: `Refresh from Google` lists models; a retired name is badged.
 - [ ] Prompt library: it **opens on a real scope**, not an empty panel. Edit, `Save`,
       `Use this one`, `Restore default`.
-- [ ] The `poster-concept` scope is listed and restorable. *(Poster designs are files
-      now, not a settings screen — see `data/poster_prompts/`.)*
+- [ ] The `poster-concept` and `poster-edit` scopes are listed and restorable. *(Poster
+      designs are files now, not a settings screen — see `data/poster_prompts/`.)*
 
 ## G · Both themes
 

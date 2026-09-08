@@ -30,6 +30,16 @@ import {
 /** How many earlier posters to keep, so a worse attempt is recoverable. */
 const HISTORY = 6
 
+/**
+ * "Let the model choose", as a Select value.
+ *
+ * Radix reserves `""` for clearing a Select, so an item with that value throws
+ * as the dropdown content mounts and the menu never opens — with no console
+ * error in a production build. A sentinel avoids the reserved value; the API
+ * still receives `""` for auto.
+ */
+const AUTO = "auto"
+
 /** A data URI back into bytes, for sending a poster up to be changed. */
 function toBlob(image: string, mediaType: string): Blob {
   const binary = atob(image)
@@ -46,7 +56,12 @@ interface Attempt {
 }
 
 /**
- * Posters. Paste the copy, pick a design, let Gemini draw the whole thing.
+ * Posters. Paste the copy; Gemini chooses a style from the nine and draws it.
+ *
+ * **The operator picks nothing.** Choosing the style is part of the same call
+ * that draws, and the choice is reported back beside the result so a poster can
+ * be explained afterwards (ADR-037). The override that pins one style is a
+ * developer control and only appears when the server allows it.
  *
  * **This screen is entirely off-machine**, unlike every other screen in the app.
  * It also gives up two things the old designer guaranteed, and both are said out
@@ -57,7 +72,12 @@ interface Attempt {
 export function PosterDesigner() {
   const [designs, setDesigns] = useState<PosterDesign[]>([])
   const [folder, setFolder] = useState("")
-  const [design, setDesign] = useState("")
+  // The operator does not pick a style — the model does, in the same call that
+  // draws (ADR-037). `forceStyle` pins it instead, and only exists when the
+  // server was started with DEV_TOOLS; it is how the other eight styles get
+  // exercised without writing copy designed to trigger each one.
+  const [devTools, setDevTools] = useState(false)
+  const [forceStyle, setForceStyle] = useState(AUTO)
   const [copy, setCopy] = useState("")
   const [parsed, setParsed] = useState<PosterCopy>({})
   const [reference, setReference] = useState<File | null>(null)
@@ -71,12 +91,15 @@ export function PosterDesigner() {
 
   const fileRef = useRef<HTMLInputElement>(null)
 
+  /** The style the model reported choosing, resolved to its readable name. */
+  const picked = designs.find((d) => d.key === result?.style)
+
   useEffect(() => {
     posterDesigns()
       .then((body) => {
         setDesigns(body.designs)
         setFolder(body.folder)
-        if (body.designs.length) setDesign((d) => d || body.designs[0].key)
+        setDevTools(body.dev_tools)
       })
       .catch(() => setDesigns([]))
     aiStatus()
@@ -132,15 +155,15 @@ export function PosterDesigner() {
   }, [])
 
   const generate = useCallback(async () => {
-    if (!design || !parsed.main) return
+    if (!parsed.main) return
     setBusy("generate")
     setError(null)
     try {
       const outcome = await generatePoster({
         copy,
-        design,
         reference,
         overBudgetOk,
+        forceStyle: devTools && forceStyle !== AUTO ? forceStyle : "",
       })
       keep(outcome)
       if (outcome.ok) {
@@ -155,7 +178,7 @@ export function PosterDesigner() {
     } finally {
       setBusy("")
     }
-  }, [copy, design, parsed.main, reference, overBudgetOk, keep])
+  }, [copy, parsed.main, reference, overBudgetOk, devTools, forceStyle, keep])
 
   const refine = useCallback(async () => {
     if (!result?.image || !note.trim()) return
@@ -191,8 +214,8 @@ export function PosterDesigner() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Poster designer</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Paste the words, pick a design, and the AI draws the poster. Change it as
-            many times as you like.
+            Paste the words. The AI picks the style that fits them and draws the
+            poster. Change it as many times as you like.
           </p>
         </div>
         <Badge variant="secondary" className="font-normal">
@@ -202,15 +225,17 @@ export function PosterDesigner() {
 
       {designs.length === 0 ? (
         <section className="space-y-2 rounded-xl border border-dashed bg-card/50 p-6">
-          <h2 className="text-sm font-medium">No poster designs yet</h2>
+          <h2 className="text-sm font-medium">No poster styles yet</h2>
           <p className="text-xs text-muted-foreground">
-            Put each design in its own <code>.md</code> file here, and it appears in this
-            list straight away — no restart:
+            The AI chooses from the styles in this folder, so it needs at least one.
+            Put each style in its own <code>.md</code> file here and it counts straight
+            away — no restart:
           </p>
           <code className="block rounded-md bg-muted px-2 py-1.5 text-xs">{folder}</code>
           <p className="text-xs text-muted-foreground">
-            The README in that folder shows the shape of a file and which words a
-            design can refer to.
+            The README in that folder shows the shape of a file, and the{" "}
+            <code>when:</code> and <code>tone:</code> lines the AI reads to decide
+            which style suits the words.
           </p>
         </section>
       ) : (
@@ -218,24 +243,44 @@ export function PosterDesigner() {
           {/* Left: what the poster is made from */}
           <div className="space-y-4">
             <section className="space-y-3 rounded-xl border bg-card p-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="poster-design">Design</Label>
-                <Select value={design} onValueChange={setDesign}>
-                  <SelectTrigger id="poster-design">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {designs.map((d) => (
-                      <SelectItem key={d.key} value={d.key}>
-                        {d.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {designs.find((d) => d.key === design)?.description}
-                </p>
-              </div>
+              {/*
+                No style picker. The model reads the copy and chooses from the
+                nine itself, in the same call that draws (ADR-037) — so the
+                operator's only input is the words, and the choice is reported
+                back beside the result rather than made up front.
+              */}
+              {devTools && (
+                <div className="space-y-1.5 rounded-lg border border-dashed p-3">
+                  <Label htmlFor="poster-force-style">
+                    Pin a style{" "}
+                    <span className="font-normal text-muted-foreground">(dev)</span>
+                  </Label>
+                  <Select value={forceStyle} onValueChange={setForceStyle}>
+                    <SelectTrigger id="poster-force-style">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {/*
+                        `AUTO`, not "". Radix reserves the empty string for
+                        clearing a Select, so an item carrying it throws while
+                        the content mounts — the dropdown then never opens at
+                        all, silently in a production build. Mapped back to ""
+                        at the call.
+                      */}
+                      <SelectItem value={AUTO}>Let the model choose</SelectItem>
+                      {designs.map((d) => (
+                        <SelectItem key={d.key} value={d.key}>
+                          {d.key} · {d.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Skips selection and draws in this style, at full spec length.
+                    Each run is a real charge.
+                  </p>
+                </div>
+              )}
 
               <div className="space-y-1.5">
                 <Label htmlFor="poster-copy">The words</Label>
@@ -370,6 +415,28 @@ export function PosterDesigner() {
                       ₹{result!.cost_rupees.toFixed(2)} · {result!.model}
                     </span>
                   </div>
+                  {/*
+                    Which style, and why. Shown because the operator no longer
+                    chose it: without this the poster arrives with no account of
+                    itself, and a run nobody can explain is a run nobody can
+                    repeat. `style` empty means the model drew but did not say —
+                    the warning list carries what it replied instead.
+                  */}
+                  {result!.style && (
+                    <p className="mt-3 border-t pt-3 text-xs">
+                      <span className="text-muted-foreground">Style chosen: </span>
+                      <span className="font-medium">
+                        {picked?.name ?? result!.style}
+                      </span>
+                      <span className="text-muted-foreground"> ({result!.style})</span>
+                      {result!.style_reason && (
+                        <span className="text-muted-foreground">
+                          {" "}
+                          — {result!.style_reason}
+                        </span>
+                      )}
+                    </p>
+                  )}
                   {result!.warnings.map((w) => (
                     <p key={w} className="mt-2 text-xs text-muted-foreground">
                       {w}

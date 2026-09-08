@@ -14,6 +14,7 @@ Three calls, in the order the operator meets them:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -31,12 +32,26 @@ MAX_COPY_CHARS = 4000
 MAX_NOTE_CHARS = 2000
 
 
-def _image(upload: UploadFile, what: str) -> tuple[bytes, str]:
+@dataclass(frozen=True)
+class _Picture:
+    """An uploaded image that has been decoded and found to be one."""
+
+    data: bytes
+    media_type: str
+    width: int
+    height: int
+
+    def as_pair(self) -> tuple[bytes, str]:
+        return self.data, self.media_type
+
+
+def _image(upload: UploadFile, what: str) -> _Picture:
     """Read an uploaded picture and say what it is.
 
     Decoded through `images.load` rather than trusted by its extension: this
     goes straight to a paid API, and a file that is not an image would spend
-    money finding that out.
+    money finding that out. The real pixel size comes back with it, because
+    changing a poster has to be able to ask for the shape it already has.
     """
     data = upload.file.read(config.MAX_UPLOAD_BYTES + 1)
     if len(data) > config.MAX_UPLOAD_BYTES:
@@ -47,7 +62,13 @@ def _image(upload: UploadFile, what: str) -> tuple[bytes, str]:
         loaded = images.load(data)
     except images.ImageError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return data, f"image/{(loaded.format or 'PNG').lower()}"
+    width, height = loaded.size
+    return _Picture(
+        data=data,
+        media_type=f"image/{(loaded.format or 'PNG').lower()}",
+        width=width,
+        height=height,
+    )
 
 
 @router.get("/posters/designs")
@@ -65,6 +86,10 @@ def list_designs() -> dict[str, object]:
         # Shown in the empty state, so the operator knows where their files go.
         "folder": str(posters.DESIGNS_DIR),
         "tags": list(posters.TAGS),
+        # The operator never picks a style — the model does. This says whether
+        # the override is available, so the screen shows it to whoever started
+        # the server with DEV_TOOLS and to nobody else (ADR-037).
+        "dev_tools": config.DEV_TOOLS,
     }
 
 
@@ -92,18 +117,32 @@ def parse_copy(
 @router.post("/posters/generate")
 def generate(
     words: Annotated[str, Form(alias="copy", max_length=MAX_COPY_CHARS)],
-    design: Annotated[str, Form(max_length=80)],
     reference: Annotated[UploadFile | None, File()] = None,
     batch: Annotated[bool, Form()] = True,
     over_budget_ok: Annotated[bool, Form()] = False,
+    force_style: Annotated[str, Form(max_length=80)] = "",
 ) -> dict[str, object]:
     """Draw the poster.
+
+    The operator sends copy and nothing else — the style is the model's choice,
+    made in the same call that draws (ADR-037).
 
     Two calls at most. Without a reference image, a cheap text call turns the
     copy into a visual idea first; with one, that step is skipped because a
     picture the operator chose is a better brief than anything written from the
     words alone.
+
+    `force_style` is refused rather than ignored when `DEV_TOOLS` is off. A
+    silently dropped override would look like the auto-selection agreeing with
+    whoever pinned it, which is the one wrong answer here.
     """
+    if force_style and not config.DEV_TOOLS:
+        raise HTTPException(
+            403,
+            "Pinning a style is a developer control. Start the server with "
+            "DEV_TOOLS=true to use it.",
+        )
+
     parsed = posters.parse_copy(words)
     if not parsed.get("main"):
         raise HTTPException(
@@ -112,7 +151,7 @@ def generate(
             "— or make it the first line of what you paste.",
         )
 
-    picture = _image(reference, "reference image") if reference is not None else None
+    picture = _image(reference, "reference image").as_pair() if reference is not None else None
 
     concept = ""
     concept_cost = 0
@@ -129,17 +168,23 @@ def generate(
             concept_error = idea.error
 
     result = ai.generate_poster(
-        design_key=design,
         copy=parsed,
         concept=concept,
         reference=picture,
         batch=batch,
         over_budget_ok=over_budget_ok,
+        force_style=force_style,
     )
 
     body = _result(result)
     body["copy"] = parsed
     body["concept"] = concept
+    # Always present, empty included. The operator did not choose the style, so
+    # this is the only account of why the poster looks the way it does — and a
+    # key that disappears when the model failed to name one is a key nothing can
+    # be logged or debugged against (ADR-037).
+    body["style"] = result.style
+    body["style_reason"] = result.style_reason
     # Both calls, added up. The operator is deciding whether to press it again,
     # and a figure that leaves out the first call is not that decision's number.
     body["cost_paise"] = int(body["cost_paise"]) + concept_cost
@@ -166,6 +211,20 @@ def refine(
     server. It is already in the page, the operator may have gone back to an
     earlier attempt, and a server-side "current poster" would be one more piece
     of state to get wrong.
+
+    Its shape is measured here and asked for again explicitly. The design that
+    made it is not part of this request — the operator may be three changes
+    deep — so the poster's own pixels are the only honest source for the ratio,
+    and sending none lets the model reshape it (ADR-036).
     """
-    data, media = _image(poster, "poster")
-    return _result(ai.refine_poster(data, media, note, batch, over_budget_ok))
+    picture = _image(poster, "poster")
+    return _result(
+        ai.refine_poster(
+            picture.data,
+            picture.media_type,
+            note,
+            batch,
+            over_budget_ok,
+            aspect=ai.nearest_aspect(picture.width, picture.height),
+        )
+    )

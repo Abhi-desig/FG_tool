@@ -936,6 +936,143 @@ still renders. Designs are files, not rows, so the operator edits them in any
 text editor and a new one needs no restart. No new dependency. Phase 5's exit
 gate is unchanged and still unmet: one real call has still never been made.
 
+## ADR-037 · The model chooses the style, in the call that draws
+
+**Date:** 2026-09-08
+**Extends:** ADR-034, ADR-036.
+**Context:** The poster screen made the operator pick a style from a dropdown
+before it knew anything about their copy. That is the wrong person deciding:
+the styles differ in layout, in look, and in the shape of copy they can carry,
+and judging which one a WhatsApp message suits is exactly the judgement the
+model is there for. The operator's input is the words.
+
+**Decision.** The operator sends copy and nothing else. One call shows the model
+every style's spec, asks it to name its choice, and draws. Auto-selection and
+generation are the same request and the same charge.
+
+**The choice is a field, not an inference.** `style` and `style_reason` are on
+every generation response — always present, empty included, because a key that
+disappears when there was nothing to report is a key nothing can be logged
+against. Validated against the folder: a style the model invented is discarded
+with a warning rather than recorded, since a plausible wrong key in a log is
+worse than a blank one.
+
+**Style files changed shape, and this is the part with a real cost.** They were
+whole prompts with `{{main}}` in them. They are now *specs* that describe only
+the look — because in auto mode all nine are shown at once, and specs carrying
+the copy would repeat the operator's words nine times. So the app assembles the
+prompt: the copy once, quoted; the concept; the chosen or candidate specs; the
+global locks. Two consequences follow:
+
+- **The selection prompt is 2406 words against 318 for a pinned style.** Eight
+  ninths of it is describing styles that will not be used. That dilution is the
+  price of one call instead of two, and it is not yet known what it costs in
+  output quality — see *Not validated*.
+- **`posterspec`'s digit refusal can no longer fire through this route.** The app
+  writes the copy, so the digits are present by construction. That is a real
+  improvement, not a lost guard: the rule is now structural rather than checked.
+  The check stays, at unit level, for the day something *writes* a prompt.
+
+**`response_schema` is not available on this path.** The image models accept
+`response_modalities`, so a text part can be requested alongside the image — but
+not a schema, so the style arrives as a line of text under a stated contract and
+is parsed. Structured output would have required a second, text-only call. Two
+calls would have bought a guaranteed field; one call was the requirement, so the
+field is guaranteed by validation instead of by schema, and an unparseable reply
+keeps the poster and reports the style as unknown.
+
+**`forceStyle` behind `DEV_TOOLS`.** Nine styles cannot be exercised by writing
+copy contrived to trigger each one. The override pins one and sends its spec at
+full length. It is **refused** rather than ignored when the flag is off: a
+silently dropped override draws in whatever the model chose and reports that
+style back, which reads exactly like the auto-selection agreeing with whoever
+pinned it.
+
+**Two bugs found on the way, both fixed rather than noted.** `AiResult.layout`
+had been declared and serialized since ADR-031 was deleted and was never once
+assigned — removed. And the override's "let the model choose" item used `value=""`,
+which Radix reserves for clearing a Select: it threw as the dropdown mounted, so
+the menu never opened, silently in a production build. A sentinel replaces it.
+
+**Not validated.** *No real Gemini call has ever been made from this repo* — the
+API key is absent. So three things in this ADR are designed but unproven: that
+the image model honours `response_modalities` and returns a usable text part at
+all; that it names a style from the list rather than inventing one; and whether a
+2406-word selection prompt produces a poster as good as a 318-word pinned one.
+The first two degrade safely — the poster survives and the style reports as
+unknown. The third does not degrade safely, and if selection quality is poor the
+honest fix is a cheap text call that selects under a real schema, at which point
+the field stops being parsed prose. Phase 5's exit gate remains unmet.
+
+## ADR-036 · The poster engine's rules are checked, not only requested
+
+**Date:** 2026-09-08
+**Extends:** ADR-034. Partially recovers ADR-030.
+**Context:** The operator brought a v1.1 poster prompt engine — a specificity
+budget, a hard typography cap, a reserved zone that must be asserted three ways,
+a banned-word list, four global locks, and a closing list headed *REJECT AND
+REBUILD IF*. It is a good document and it diagnoses three real Gemini
+behaviours: it ignores absence, so an unspecified region gets filled; its
+lettering degrades with volume; and it defaults to stock imagery when
+under-specified.
+
+**Decision.** Pin the engine in three places, according to what each rule
+actually is.
+
+1. *Rules that are instructions to a model* go in the prompt library, where the
+   operator can read and tune them. `poster-concept` carries the specificity
+   budget and the three-way reserved zone; a new `poster-edit` scope carries the
+   full pixel-for-pixel freeze clause, replacing three hardcoded sentences.
+2. *Rules that can be checked* go in `backend/posterspec.py`, read against the
+   finished prompt before the call. Every check is exact or absent.
+3. *Rules that are really request parameters* stop being prose. A design's
+   `aspect:` is sent to Google as `ImageConfig.aspect_ratio`, and a change
+   request measures the poster it was given and asks for that same shape.
+
+**Only one check refuses: a number from the copy has gone missing from the
+prompt.** This is the part of ADR-030 that can be won back without taking the
+drawing back. ADR-030 forbade the AI from writing a figure the operator had not
+typed; that became unenforceable when the words moved inside the picture. What
+is still enforceable is the other direction — a price or phone number the model
+never sees is one it will invent, and a poster with the shop's number one digit
+wrong is printed, delivered and paid for before anyone reads it. Checked one way
+only, because a v1.1 prompt is full of digits that are not copy: 7% margins, 1px
+strokes, twelve metres. "No digit the operator did not supply" is not a rule
+that can hold.
+
+**Everything else warns and spends anyway.** A validator that refuses on
+judgement is one the operator learns to click past — and the override would take
+the digit check with it. So the word cap, the banned adjectives, the undeclared
+palette and the missing locks are notes beside the poster, not gates.
+
+**What was deliberately not built.** The engine's Step 4 scores a 19-style
+library and selects one. That library was not supplied — the pasted spec says
+*"paste it beneath this block"* and the block was not included — and its 19
+styles are the operator's own design work, not something to invent on their
+behalf. The `data/poster_prompts/` folder is already the right home for it, one
+file per style. Until those files exist there is nothing to score, so style
+selection stays the operator's dropdown. Steps 1, 2 and 4 (blocking, ranking,
+scoring) therefore remain unimplemented, and MASTER's router is not a prompt at
+all — generate and refine are two routes, and the code already decides between
+them by which one was called.
+
+**Honest about reach.** While a prompt is built by substituting copy into a
+design, the copy's digits are in it by construction and the digit check is
+nearly dormant — it fires on one real interaction (two tags sharing a line, one
+of them empty, the line dropped whole) and otherwise waits. It stops being
+dormant the moment anything *writes* a prompt rather than filling one in, which
+is what Step 4 would do.
+
+**Consequences:** One new module, no new dependency. `templating.render` now
+drops a line containing an empty quoted string, because in this engine a quoted
+run is lettering and an empty pair invites invention. `seed_defaults` updates a
+shipped default the operator has never edited — otherwise an improved prompt
+only ever helps a fresh install, and "delete data.db" is not an upgrade path for
+a machine with nobody to run it; an edited prompt is never touched, and
+`prompt_versions` is what tells the two apart. Phase 5's exit gate is unchanged
+and still unmet: no real Gemini call has ever been made, so none of the three
+behaviours this ADR is built around has been observed on this machine.
+
 ## ADR-035 · A column is classified before anything is translated
 
 **Date:** 2026-09-07
