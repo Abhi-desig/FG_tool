@@ -12,16 +12,33 @@ Three things make it safe to edit:
 * **Variable checking.** A template referring to `{{colour}}` when its scope only
   provides `{{palette}}` is caught at save time, not halfway through a paid job.
 
-`poster-concept` is the one that shapes a poster now: it turns the operator's
-copy into a visual idea, which is then dropped into whichever design they picked
-from `data/poster_prompts/`. The designs themselves are files, not rows here —
-they are the shop's own work and `features/posters.py` reads them (ADR-034).
+Two scopes shape a poster, and between them they hold the poster engine's own
+rules (v1.1, ADR-036) so the operator can tune them here rather than in code:
+
+* **`poster-concept`** turns the copy into a visual idea, under the engine's
+  specificity budget — a named material, a stated light direction, a camera
+  position, a named highlight, one imperfection, qualified colours — and states
+  the reserved zone three ways, because an area a prompt does not claim is one
+  the image model fills. Its answer fills `{{concept}}` in whichever design was
+  picked from `data/poster_prompts/`.
+* **`poster-edit`** is the freeze clause behind "Change this": the full
+  pixel-for-pixel inventory that keeps a one-line change from becoming a redraw.
+
+The designs themselves are files, not rows here — they are the shop's own work
+and `features/posters.py` reads them (ADR-034). The rules that can be *checked*
+rather than merely asked for live in `features/posterspec.py`, which reads the
+finished prompt before any money is spent.
+
+**A shipped default the operator has never edited is updated in place** when its
+seed here improves; anything they have edited is left alone. See
+`seed_defaults`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any
 
 from backend import db
@@ -58,6 +75,17 @@ SCOPES: tuple[Scope, ...] = (
         required=("main",),
     ),
     Scope(
+        key="poster-edit",
+        label="Poster change instruction",
+        description=(
+            "Wraps your note in the freeze clause that stops Gemini redrawing "
+            "the whole poster when you asked it to change one thing. Used by "
+            "“Change this” under a finished poster."
+        ),
+        variables=("note",),
+        required=("note",),
+    ),
+    Scope(
         key="photo-edit",
         label="Photo edit instruction",
         description="Tells the AI what to change in a client photograph.",
@@ -71,23 +99,75 @@ SCOPE_KEYS = {s.key: s for s in SCOPES}
 # Shipped so the operator opens a working set, not an empty screen.
 SEEDS: dict[str, str] = {
     "poster-concept": (
-        "You are deciding what a printed shop poster should look like, from its\n"
-        "words alone.\n"
+        "You are an art director deciding what a printed shop poster should look\n"
+        "like, from its words alone. This is for a printing and advertising shop\n"
+        "in Kerala.\n"
         "\n"
         "Headline: {{main}}\n"
         "Second line: {{h1}}\n"
         "Third line: {{h2}}\n"
         "\n"
-        "Reply with two or three sentences describing the picture: the subject,\n"
-        "the mood, the colours, the light, and where the poster should be left\n"
-        "calm so the words stay readable.\n"
+        "Write one paragraph — four to six sentences — describing the picture the\n"
+        "words will sit on. An image model reads this, so every sentence must\n"
+        "name something it can draw.\n"
         "\n"
-        "Rules:\n"
-        "- Describe the picture only. Do not repeat the words back, do not\n"
-        "  suggest wording, and do not mention fonts or type sizes.\n"
-        "- This is for a printing and advertising shop in Kerala. Keep the\n"
-        "  imagery plausible for that, not generic stock photography.\n"
-        "- No prose around your answer, no heading, no code fence.\n"
+        "The paragraph must contain all six of these:\n"
+        "- One named material with its finish — weathered red clay tile, brushed\n"
+        "  stainless, powder-coated white steel. Not \"metal\", not \"wood\".\n"
+        "- One time of day, with the light direction and quality stated: late\n"
+        "  golden-hour light raking in from the left, flat overcast light from\n"
+        "  above.\n"
+        "- One camera position and distance: straight-on at eye level from about\n"
+        "  twelve metres, low three-quarter view from two metres.\n"
+        "- One named specular highlight on a named surface.\n"
+        "- One small authentic imperfection — a slightly uneven tile course, a\n"
+        "  worn step edge, one strand of a garland hanging lower.\n"
+        "- Colours named with a qualifier: warm gold, deep navy, dusty green.\n"
+        "  Never a bare colour name.\n"
+        "\n"
+        "Then state the reserved zone, in this order and all three ways, because\n"
+        "an area you do not claim is one the image model fills — usually over the\n"
+        "type:\n"
+        "1. As geometry, with a percentage: \"the upper 45% of the frame is held\n"
+        "   empty\".\n"
+        "2. As positive content, described as a subject in its own right: \"one\n"
+        "   continuous field of deep blue sky, evenly graded and slightly deeper\n"
+        "   toward the top, smooth and free of detail\".\n"
+        "3. As a short fence naming what may not enter it: \"nothing enters this\n"
+        "   area — no clouds, no birds, no wires, no palm fronds, no roofline\".\n"
+        "Never write only \"empty space\" or \"negative space\".\n"
+        "\n"
+        "Never use these words. Each one tells an image model nothing and takes\n"
+        "the place of something that would: beautiful, stunning, vibrant,\n"
+        "dynamic, eye-catching, modern-looking, high quality, professional,\n"
+        "masterpiece, 4k, ultra HD, award-winning, breathtaking, perfect.\n"
+        "\n"
+        "Describe the picture only. Do not repeat the poster's words back, do not\n"
+        "suggest wording, and do not mention fonts, type sizes or layout. No\n"
+        "heading, no code fence, no prose around your answer.\n"
+    ),
+    "poster-edit": (
+        "Using the provided image, change only {{note}}.\n"
+        "\n"
+        "Keep every other part of the image exactly as it is, pixel for pixel:\n"
+        "the same framing, crop and aspect ratio; the same camera angle, height\n"
+        "and focal length; the same composition and the position of every object;\n"
+        "the same subject identity, face, skin tone, hair, expression and pose;\n"
+        "the same clothing, materials and surface texture; the same light\n"
+        "direction, intensity, colour temperature and shadow shape; the same\n"
+        "colour grade, contrast, saturation and grain; the same background\n"
+        "including all out-of-focus areas; and every text element unchanged in\n"
+        "wording, spelling, font, weight, size, colour and position.\n"
+        "\n"
+        "If the change forces a secondary effect — a colour swap altering a\n"
+        "reflection, a removed object revealing background — allow only the\n"
+        "minimum local consequence.\n"
+        "\n"
+        "Do not regenerate or reinterpret the poster. Do not improve, re-balance,\n"
+        "re-grade, re-crop, re-light or re-typeset it. Do not add or remove\n"
+        "anything that is not named above, and do not add any word, number,\n"
+        "price, date or phone number that is not already on the poster. This is a\n"
+        "targeted local edit to an existing poster, not a new image.\n"
     ),
     "photo-edit": (
         "Edit this photograph.\n"
@@ -102,8 +182,36 @@ SEEDS: dict[str, str] = {
 }
 
 
+# Bodies this app shipped in an earlier version, by scope, as SHA-256 of the
+# exact stored text. A default still holding one of these has never been written
+# by the operator, whatever its version history says, so an update may replace
+# it — see `seed_defaults`.
+#
+# Hashes rather than the retired prose: the point is to recognise old text, not
+# to keep a growing museum of it in the source. To retire a seed, hash the body
+# being replaced and add it here:
+#
+#     python -c "import hashlib,pathlib;print(hashlib.sha256(
+#         pathlib.Path('old.txt').read_bytes()).hexdigest())"
+SUPERSEDED_SEEDS: dict[str, frozenset[str]] = {
+    # The pre-v1.1 concept prompt: "two or three sentences describing the
+    # picture", with no specificity budget and no reserved zone (ADR-036).
+    "poster-concept": frozenset(
+        {"83e447f9744e86dc3c59dc16c4770914314d3693af76dedb3c027ae34935a605"}
+    ),
+}
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _is_shipped_text(scope: str, body: str) -> bool:
+    """Whether this body is one the app wrote, rather than one the operator did."""
+    if body == SEEDS.get(scope):
+        return True
+    digest = sha256(body.encode("utf-8")).hexdigest()
+    return digest in SUPERSEDED_SEEDS.get(scope, frozenset())
 
 
 def validate(scope: str, body: str) -> list[str]:
@@ -155,6 +263,38 @@ def seed_defaults() -> None:
                 "VALUES(?, 'Default', ?, 1, 1, ?) "
                 "ON CONFLICT(scope, name) DO NOTHING",
                 (scope, body, _now()),
+            )
+            # An improved shipped prompt must reach a database that already ran,
+            # or it only ever helps a fresh install — and "delete data.db" is
+            # not an upgrade path for a machine with nobody to run it.
+            # `INSERT ... DO NOTHING` above cannot do it, so the refresh is
+            # separate and narrow.
+            #
+            # Two ways to know a body is the app's and not the operator's, and
+            # both are needed. No rows in `prompt_versions` means it has never
+            # been saved over at all. But a version history is not proof of
+            # authorship either: restoring a default, or a round trip through
+            # the editor that changed nothing, files a version while leaving
+            # shipped text in place — so a body that still matches something
+            # this app has shipped is ours to replace whatever its history says.
+            #
+            # Anything else is the operator's wording and is never touched.
+            row = cur.execute(
+                "SELECT id, body FROM prompts "
+                "WHERE scope = ? AND name = 'Default' AND is_default = 1",
+                (scope,),
+            ).fetchone()
+            if row is None or row["body"] == body:
+                continue
+            edited = cur.execute(
+                "SELECT 1 FROM prompt_versions WHERE prompt_id = ? LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+            if edited and not _is_shipped_text(scope, row["body"]):
+                continue
+            cur.execute(
+                "UPDATE prompts SET body = ?, updated_at = ? WHERE id = ?",
+                (body, _now(), row["id"]),
             )
         placeholders = ",".join("?" * len(SCOPE_KEYS))
         cur.execute(
