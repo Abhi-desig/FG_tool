@@ -280,8 +280,9 @@ def _result(result: ai.AiResult) -> dict[str, object]:
     if result.image is not None:
         body["image"] = base64.b64encode(result.image).decode("ascii")
         body["media_type"] = result.media_type
-    if result.layout is not None:
-        body["layout"] = result.layout
+    # `style` is deliberately not here. It belongs to poster generation only,
+    # and the route adds it there — always, even when empty, because a field
+    # that vanishes when there is nothing to report cannot be logged against.
     if result.alternatives is not None:
         body["alternatives"] = result.alternatives
     return body
