@@ -16,6 +16,12 @@ VARIABLE = re.compile(r"\{\{\s*([a-z_][a-z0-9_]*)\s*\}\}")
 # model as a field it should invent something for.
 BARE_LABEL = re.compile(r"\s*[A-Z][A-Za-z ]{0,24}:\s*")
 
+# An on-poster string that came out empty: `... text reading ""`. In the poster
+# engine every quoted run is lettering the image model is being told to draw, so
+# an empty pair is an instruction to letter nothing — which it answers by
+# inventing something to put there. The line goes instead.
+EMPTY_QUOTE = re.compile(r'""')
+
 
 def variables_in(body: str) -> list[str]:
     """Distinct `{{variable}}` names, in order of first appearance."""
@@ -39,5 +45,9 @@ def render(body: str, values: dict[str, str]) -> str:
         return (values.get(match.group(1)) or "").strip()
 
     filled = VARIABLE.sub(swap, body)
-    kept = [line for line in filled.splitlines() if not BARE_LABEL.fullmatch(line)]
+    kept = [
+        line
+        for line in filled.splitlines()
+        if not BARE_LABEL.fullmatch(line) and not EMPTY_QUOTE.search(line)
+    ]
     return "\n".join(kept).strip()
