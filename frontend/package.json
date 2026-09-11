@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "postbuild": "cd .. && uv run python scripts/check_release.py --stamp",
     "lint": "oxlint",
     "preview": "vite preview"
   },

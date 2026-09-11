@@ -19,9 +19,14 @@ hand-assembled folder is how `models/` or a `.env` ends up on a USB stick.
 `frontend/dist` **is** included and is the whole reason this is not just a git
 clone: it is the built UI, and without it the app serves a 503 stub.
 
+**It refuses to package anything the gate rejects.** `scripts/qc.py` runs first
+and a failure stops the build. A zip is the one artefact nobody re-runs anything
+against — it goes to a machine with no tests, no Node and no git, and whatever
+is wrong in it stays wrong until a client sees it.
+
     uv run python scripts/package_windows.py
 
-Exit codes: 0 built, 1 the UI is not built or not consistent, 2 the script
+Exit codes: 0 built, 1 the gate failed or the UI is not built, 2 the script
 could not run from here.
 """
 
@@ -31,18 +36,30 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "dist"
-NAME = "FocusToolkit-windows"
+NAME = "focus-toolkit-shop"
 
 # Copied wholesale. Anything not named here does not travel.
-TREES = ("backend", "data/maps", "frontend/dist")
+#
+# `data` entire, not `data/maps`. It used to be the one subfolder, and every
+# asset added since was silently left behind: the 1.7 MB Olam word library, the
+# name lexicon, the place gazetteer, and all nine poster styles. A shop PC
+# unzipping that package got a poster screen reading "No poster styles yet" and
+# a translator with no offline dictionary — most of three phases of work,
+# missing, with nothing to say so. The whole folder is 1.7 MB, and naming the
+# folder rather than its children means the next asset travels by default
+# instead of by memory.
+TREES = ("backend", "data", "frontend/dist")
 FILES = (
     "pyproject.toml",
     "uv.lock",
-    "start.bat",
+    # `start.bat` is deliberately not here. The package ships
+    # START-FOCUS-TOOLKIT.bat instead, and two launchers in one folder is one
+    # launcher too many for somebody being told over the phone what to click.
     "check-ai.bat",
     "README.md",
     "QC.md",
@@ -62,21 +79,45 @@ def refused(path: Path) -> bool:
     return any(part in BANNED_DIRS for part in path.parts)
 
 
-START_HERE = """FOCUS TOOLKIT — how to start it on this computer
-================================================
+START_HERE = """FOCUS TOOLKIT — read this first
+===============================
 
-You only do steps 1 and 2 once, ever.
+You only do steps 1, 2 and 3 once, ever. After that it is one
+double-click to start.
 
 
-1. INSTALL PYTHON'S INSTALLER (called "uv")
+1. PUT THIS FOLDER SOMEWHERE SENSIBLE
+-------------------------------------
+Unzip this to a normal folder on the C: drive. This works well:
+
+    C:\\FocusToolkit
+
+Do NOT leave it inside the Downloads folder, and do NOT run it from
+inside the zip file. Windows makes a read-only copy in both cases and
+the toolkit cannot save anything.
+
+Do not put it on the Desktop or in OneDrive either — OneDrive tries to
+sync it and the toolkit slows to a crawl.
+
+
+2. INSTALL PYTHON'S INSTALLER (called "uv")
 -------------------------------------------
 Double-click:  install-uv.bat
 
 A black window opens and downloads about 30 MB. When it says it is
 finished, close it. If Windows asks whether to allow it, say yes.
 
+If Windows says "Windows protected your PC", click "More info", then
+"Run anyway". That message appears for anything not bought from the
+Microsoft Store.
 
-2. INSTALL THE TOOLKIT
+YOU DO NOT NEED TO INSTALL PYTHON YOURSELF. uv brings its own. If
+something tells you Python is missing, or you see "python is not
+recognised as an internal or external command", it means step 2 did
+not finish — run install-uv.bat again and watch for a red error.
+
+
+3. INSTALL THE TOOLKIT
 ----------------------
 Double-click:  first-time-setup.bat
 
@@ -85,19 +126,42 @@ around 10 to 20 minutes on a normal connection, and about 4 GB. Leave it
 running. It only happens once.
 
 
-3. START IT
+4. START IT
 -----------
-Double-click:  start.bat
+Double-click:  START-FOCUS-TOOLKIT.bat
 
-Your web browser opens with the toolkit in it. That is the app.
+A black window opens, then your web browser opens with the toolkit in
+it. That is the app.
 
-To make it easier next time: right-click start.bat, choose "Send to",
-then "Desktop (create shortcut)". Now it is an icon on your desktop.
+Make it easier next time: right-click START-FOCUS-TOOLKIT.bat, choose
+"Send to", then "Desktop (create shortcut)". Now it is an icon on your
+desktop.
+
+If the browser does not open on its own, open it yourself and type this
+into the address bar:
+
+    localhost:8000
 
 
 TO CLOSE IT
 -----------
-Close the black window. Closing only the browser leaves it running.
+Close the black window. Closing only the browser leaves it running in
+the background.
+
+
+TWO THINGS THAT LOOK WRONG BUT ARE NOT
+--------------------------------------
+* REMOVING A BACKGROUND OR ENLARGING A PICTURE TAKES 2 TO 3 MINUTES
+  PER IMAGE. That is normal. It is doing real work on this computer
+  rather than sending your client's photo to a website. The screen
+  shows which step it is on and how long it has been going. Do not
+  close it — and the very first time you use each of those two tools
+  it also downloads what it needs, so that one is slower still.
+
+* THE RUPEE FIGURE ON SCREEN IS AN ESTIMATE, NOT A BILL. The AI
+  features show roughly what they have cost this month. It is close,
+  but the real number is the one on Google's own billing page. Treat
+  the figure here as a warning light, not an invoice.
 
 
 IF THE AI FEATURES DO NOT WORK
@@ -110,10 +174,10 @@ costs nothing to run.
 
 THINGS WORTH KNOWING
 --------------------
-* Nothing leaves this computer except the two features that say so on
+* Nothing leaves this computer except the features that say so on
   screen before they run: the Malayalam check in the Excel translator,
-  and the AI picture and wording on the poster screen. Everything else
-  works with the internet unplugged.
+  and the poster screen. Everything else works with the internet
+  unplugged.
 
 * Your clients, your glossary and your remembered corrections are stored
   in a file called data.db next to this one. It is created the first time
@@ -121,8 +185,11 @@ THINGS WORTH KNOWING
 
 * API keys are typed into the Settings screen, not into any file here.
 
-* The first time you remove a background or enlarge an image, it downloads
-  the model it needs. That is a one-off wait per tool.
+* Malayalam written into a poster picture by the AI is often misspelled.
+  Read every word on a poster against what you typed before printing it.
+
+* VERSION.txt says exactly which build this is. If you report a problem,
+  send that file with it.
 """
 
 INSTALL_UV = """@echo off
@@ -153,10 +220,73 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo Done. From now on, just double-click start.bat
+echo Done. From now on, just double-click START-FOCUS-TOOLKIT.bat
 echo.
 pause
 """
+
+
+START_APP = """@echo off
+REM Focus Toolkit - double-click this to start.
+REM Make it a desktop icon: right-click this file, Send to, Desktop (create shortcut).
+cd /d "%~dp0"
+title Focus Toolkit - keep this window open
+echo Starting the Focus Toolkit.
+echo Your browser will open in a few seconds.
+echo.
+echo KEEP THIS BLACK WINDOW OPEN while you use the toolkit.
+echo Closing it stops the toolkit.
+echo.
+REM The server opens the browser itself once it is actually listening, which is
+REM the only moment that is not too early. See OPEN_BROWSER in backend/config.py.
+uv run python -m backend.main
+if errorlevel 1 (
+  echo.
+  echo The toolkit could not start.
+  echo If this is the first time, run first-time-setup.bat and try again.
+  echo If it still fails, run check-ai.bat and read README-FIRST.txt.
+  pause
+)
+"""
+
+
+def version_text() -> str:
+    """What is in this zip, so a bug report can name a build.
+
+    The operator will never read this. It is for whoever is asked "which
+    version is on the shop PC?" three months from now, when the answer decides
+    whether a bug is already fixed.
+    """
+    commit = git("rev-parse", "HEAD") or "unknown"
+    described = git("describe", "--always", "--dirty") or ""
+    branch = git("rev-parse", "--abbrev-ref", "HEAD") or "unknown"
+    built = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    dirty = "-dirty" in described
+    lines = [
+        "Focus Toolkit — shop package",
+        "",
+        f"Commit: {commit.strip()}",
+        f"Branch: {branch.strip()}",
+        f"Built:  {built}",
+    ]
+    if dirty:
+        lines += [
+            "",
+            "WARNING: built from a working tree with uncommitted changes, so",
+            "the commit above does not fully describe what is in this zip.",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def git(*args: str) -> str | None:
+    """Run git, or None if it cannot answer. A zip must still build without it."""
+    try:
+        done = subprocess.run(
+            ("git", *args), cwd=ROOT, capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return None
+    return done.stdout if done.returncode == 0 else None
 
 
 def build() -> int:
@@ -166,20 +296,33 @@ def build() -> int:
         print("      cd frontend && npm run build")
         return 1
 
-    # The UI in the package must be the UI in the source tree. This is the same
-    # failure `check_release.py` exists to stop (NEXT.md 0.1), one step later:
-    # shipping a zip built from a stale bundle.
-    check = subprocess.run(
-        (sys.executable, str(ROOT / "scripts" / "check_release.py")),
+    # The whole gate, not just the release check. A zip is the one artefact
+    # nobody re-runs anything against: it is copied to a machine with no tests,
+    # no Node and no git, and whatever is wrong in it stays wrong until a client
+    # sees it. `qc.py` includes `check_release.py`, so the stale-bundle check
+    # this used to run on its own is still here, with the other four gates
+    # around it.
+    #
+    # Skips do not block. On this machine the gate is green; on a machine
+    # without the models a skip means a test could not run, not that something
+    # is broken, and refusing to package for that would make the packager
+    # unusable exactly where it is most needed. `qc.py` exits 0 for skips alone
+    # and 1 for any real failure, which is the line this wants.
+    print("...   running the full gate (this takes a couple of minutes)")
+    gate = subprocess.run(
+        ("uv", "run", "python", str(ROOT / "scripts" / "qc.py")),
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
-    if check.returncode != 0:
-        print("FAIL  the built UI and the committed UI disagree — not packaging that.")
-        print(check.stdout.rstrip())
+    if gate.returncode != 0:
+        print("FAIL  the gate did not pass — not packaging that.")
+        print(gate.stdout.rstrip()[-3000:])
         return 1
+    for line in gate.stdout.splitlines():
+        if line.startswith(("PASS ", "SKIP ", "FAIL ")) or line.startswith("5 gates"):
+            print(f"      {line}")
 
     staging = OUT_DIR / NAME
     if staging.exists():
@@ -206,10 +349,12 @@ def build() -> int:
             shutil.copy2(source, staging / name)
             copied += 1
 
-    (staging / "START-HERE.txt").write_text(START_HERE, encoding="utf-8")
+    (staging / "README-FIRST.txt").write_text(START_HERE, encoding="utf-8")
     (staging / "install-uv.bat").write_text(INSTALL_UV, encoding="utf-8")
     (staging / "first-time-setup.bat").write_text(FIRST_RUN, encoding="utf-8")
-    copied += 3
+    (staging / "START-FOCUS-TOOLKIT.bat").write_text(START_APP, encoding="utf-8")
+    (staging / "VERSION.txt").write_text(version_text(), encoding="utf-8")
+    copied += 5
 
     # Last line of defence: assert nothing forbidden reached the staging folder
     # before it is sealed into a zip somebody will email.
@@ -228,7 +373,7 @@ def build() -> int:
 
     size_mb = archive.stat().st_size / 1_000_000
     print(f"OK    {archive.relative_to(ROOT)} — {copied} files, {size_mb:.1f} MB")
-    print("      Copy it to the shop PC, unzip it, and open START-HERE.txt.")
+    print("      Copy it to the shop PC, unzip it, and open README-FIRST.txt.")
     return 0
 
 
