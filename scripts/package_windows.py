@@ -13,7 +13,9 @@ hand-assembled folder is how `models/` or a `.env` ends up on a USB stick.
   Settings, encrypted at rest there.
 * `*.db` — the operator's own clients, glossary and corrections. Shipping a
   database would overwrite theirs, and shipping *ours* would leak test data.
-* `models/` — 1.4 GB of weights that download on first use anyway.
+* `models/` — 2.0 GB of weights that download themselves on first use. Pass
+  `--with-models` to bundle them anyway, for a shop PC on a slow or metered
+  connection: the package goes from ~2 MB to ~1.7 GB and nothing downloads.
 * `tests/`, `frontend/src/`, `node_modules/` — the shop PC cannot run any of it.
 
 `frontend/dist` **is** included and is the whole reason this is not just a git
@@ -25,6 +27,7 @@ against — it goes to a machine with no tests, no Node and no git, and whatever
 is wrong in it stays wrong until a client sees it.
 
     uv run python scripts/package_windows.py
+    uv run python scripts/package_windows.py --with-models
 
 Exit codes: 0 built, 1 the gate failed or the UI is not built, 2 the script
 could not run from here.
@@ -73,10 +76,61 @@ BANNED_DIRS = {"__pycache__", "node_modules", ".git", "models", "tests", ".venv"
 BANNED_SUFFIXES = {".db", ".pyc", ".log"}
 
 
-def refused(path: Path) -> bool:
+def refused(path: Path, with_models: bool = False) -> bool:
+    """Whether this file must not travel.
+
+    `with_models` lifts the ban on `models/` alone — nothing else. The weights
+    are excluded by default because they are 2 GB and download themselves on
+    first use, not because they are secret; `.env` and `*.db` stay refused
+    either way, and those are the two that matter.
+    """
     if path.name in BANNED_NAMES or path.suffix in BANNED_SUFFIXES:
         return True
-    return any(part in BANNED_DIRS for part in path.parts)
+    banned = BANNED_DIRS - {"models"} if with_models else BANNED_DIRS
+    return any(part in banned for part in path.parts)
+
+
+def copy_models(staging: Path) -> int:
+    """Copy the weights, flattening the HuggingFace cache as it goes.
+
+    **Why flattening is not optional.** `models/hf` is 1.0 GB on disk but 2.0 GB
+    if you follow its symlinks: every file under `snapshots/` is a link into
+    `blobs/`. Copying naively would double the package, and Windows cannot use a
+    symlink out of a zip anyway — its own extractor writes the link *text* into
+    a file, which breaks the model rather than merely wasting space.
+
+    So the snapshots are materialised into real files and `blobs/` is dropped.
+    `from_pretrained` resolves `refs/main` to a snapshot directory and reads the
+    files there; with those real, the blobs behind them are dead weight. Proved
+    by loading the translator from a flattened copy with the network off before
+    this was written, not assumed.
+    """
+    source = ROOT / "models"
+    copied = 0
+    for path in source.rglob("*"):
+        relative = path.relative_to(source)
+        if "blobs" in relative.parts:
+            continue
+        # The cache is not only weights. `hf/xet/logs/*.log` is telemetry the
+        # hub writes beside them, and the final sweep rightly refuses it — but
+        # discovering that after two gigabytes have been copied is a slow way to
+        # be told. Filter here, with the same rules, so the sweep stays a
+        # backstop rather than the thing that finds this.
+        if refused(Path("models") / relative, with_models=True):
+            continue
+
+        target = staging / "models" / relative
+        if path.is_dir() and not path.is_symlink():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        # `is_file` follows the link, so this also drops a broken one rather
+        # than packaging a dangling entry.
+        if not path.is_file():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target, follow_symlinks=True)
+        copied += 1
+    return copied
 
 
 START_HERE = """FOCUS TOOLKIT — read this first
@@ -250,7 +304,7 @@ if errorlevel 1 (
 """
 
 
-def version_text() -> str:
+def version_text(with_models: bool = False) -> str:
     """What is in this zip, so a bug report can name a build.
 
     The operator will never read this. It is for whoever is asked "which
@@ -268,6 +322,7 @@ def version_text() -> str:
         f"Commit: {commit.strip()}",
         f"Branch: {branch.strip()}",
         f"Built:  {built}",
+        f"Models: {'bundled — nothing downloads' if with_models else 'download on first use'}",
     ]
     if dirty:
         lines += [
@@ -289,7 +344,7 @@ def git(*args: str) -> str | None:
     return done.stdout if done.returncode == 0 else None
 
 
-def build() -> int:
+def build(with_models: bool = False) -> int:
     index = ROOT / "frontend" / "dist" / "index.html"
     if not index.exists():
         print("FAIL  frontend/dist is not built — the package would serve a blank app.")
@@ -349,39 +404,66 @@ def build() -> int:
             shutil.copy2(source, staging / name)
             copied += 1
 
-    (staging / "README-FIRST.txt").write_text(START_HERE, encoding="utf-8")
+    if with_models:
+        weights = copy_models(staging)
+        copied += weights
+        print(f"      bundled {weights} model files — nothing downloads on first use")
+
+    readme = START_HERE
+    if with_models:
+        # The default README promises a one-off download per tool. With the
+        # weights in the box that sentence is simply untrue, and a false
+        # warning is how an operator learns to ignore the true ones.
+        readme = readme.replace(
+            "  close it — and the very first time you use each of those two tools\n"
+            "  it also downloads what it needs, so that one is slower still.",
+            "  close it. Everything it needs is already in this folder, so there\n"
+            "  is nothing to download and no wait beyond the work itself.",
+        )
+    (staging / "README-FIRST.txt").write_text(readme, encoding="utf-8")
     (staging / "install-uv.bat").write_text(INSTALL_UV, encoding="utf-8")
     (staging / "first-time-setup.bat").write_text(FIRST_RUN, encoding="utf-8")
     (staging / "START-FOCUS-TOOLKIT.bat").write_text(START_APP, encoding="utf-8")
-    (staging / "VERSION.txt").write_text(version_text(), encoding="utf-8")
+    (staging / "VERSION.txt").write_text(version_text(with_models), encoding="utf-8")
     copied += 5
 
     # Last line of defence: assert nothing forbidden reached the staging folder
     # before it is sealed into a zip somebody will email.
     for path in staging.rglob("*"):
-        if path.is_file() and refused(path.relative_to(staging)):
+        if path.is_file() and refused(path.relative_to(staging), with_models):
             print(f"FAIL  {path.relative_to(staging)} must never be packaged.")
             return 1
 
-    archive = OUT_DIR / f"{NAME}.zip"
+    archive = OUT_DIR / (f"{NAME}-complete.zip" if with_models else f"{NAME}.zip")
     if archive.exists():
         archive.unlink()
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+    # Level 1 once the weights are in. safetensors, .bin and .onnx are already
+    # packed and level 9 spends several minutes to save almost nothing on two
+    # gigabytes of them.
+    level = 1 if with_models else 9
+    print(f"...   compressing (this takes a while at {size_of(staging)/1e9:.1f} GB)"
+          if with_models else "...   compressing")
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=level) as zf:
         for path in sorted(staging.rglob("*")):
             if path.is_file():
                 zf.write(path, path.relative_to(OUT_DIR))
 
     size_mb = archive.stat().st_size / 1_000_000
-    print(f"OK    {archive.relative_to(ROOT)} — {copied} files, {size_mb:.1f} MB")
+    shown = f"{size_mb / 1000:.2f} GB" if size_mb > 1000 else f"{size_mb:.1f} MB"
+    print(f"OK    {archive.relative_to(ROOT)} — {copied} files, {shown}")
     print("      Copy it to the shop PC, unzip it, and open README-FIRST.txt.")
     return 0
+
+
+def size_of(folder: Path) -> int:
+    return sum(f.stat().st_size for f in folder.rglob("*") if f.is_file())
 
 
 def main() -> int:
     if not (ROOT / "pyproject.toml").exists():
         print("FAIL  run this from the repo.")
         return 2
-    return build()
+    return build(with_models="--with-models" in sys.argv[1:])
 
 
 if __name__ == "__main__":
