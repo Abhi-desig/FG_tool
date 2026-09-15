@@ -90,6 +90,32 @@ def refused(path: Path, with_models: bool = False) -> bool:
     return any(part in banned for part in path.parts)
 
 
+# Files the operator or cmd.exe reads directly, which therefore need Windows
+# line endings. Everything under `data/` is deliberately NOT in this list: those
+# are read by Python, whose text mode translates CRLF on the way in anyway, and
+# rewriting them would churn bytes for nobody's benefit.
+WINDOWS_TEXT = {".bat", ".txt", ".md"}
+
+
+def write_for_windows(target: Path, text: str) -> None:
+    """Write a text file with CRLF endings.
+
+    **Both halves of this matter on the shop PC.** `cmd.exe` parses a multi-line
+    `if errorlevel 1 ( ... )` block by reading ahead, and LF-only endings are a
+    known way to make it mis-handle the block — `START-FOCUS-TOOLKIT.bat` and
+    `first-time-setup.bat` both contain exactly that construct, and both are
+    error paths, so it would fail only when something had already gone wrong.
+    And Notepad before Windows 10 1809 renders an LF-only file as one unbroken
+    line: README-FIRST.txt is the first thing the operator ever opens, and a
+    wall of text is a bad first impression of a tool they did not ask for.
+
+    Normalised first, so a file that already has CRLF does not end up with CR CR
+    LF.
+    """
+    body = text.replace("\r\n", "\n").replace("\r", "\n")
+    target.write_text(body, encoding="utf-8", newline="\r\n")
+
+
 def copy_models(staging: Path) -> int:
     """Copy the weights, flattening the HuggingFace cache as it goes.
 
@@ -400,9 +426,13 @@ def build(with_models: bool = False) -> int:
 
     for name in FILES:
         source = ROOT / name
-        if source.exists():
+        if not source.exists():
+            continue
+        if source.suffix.lower() in WINDOWS_TEXT:
+            write_for_windows(staging / name, source.read_text(encoding="utf-8"))
+        else:
             shutil.copy2(source, staging / name)
-            copied += 1
+        copied += 1
 
     if with_models:
         weights = copy_models(staging)
@@ -420,11 +450,11 @@ def build(with_models: bool = False) -> int:
             "  close it. Everything it needs is already in this folder, so there\n"
             "  is nothing to download and no wait beyond the work itself.",
         )
-    (staging / "README-FIRST.txt").write_text(readme, encoding="utf-8")
-    (staging / "install-uv.bat").write_text(INSTALL_UV, encoding="utf-8")
-    (staging / "first-time-setup.bat").write_text(FIRST_RUN, encoding="utf-8")
-    (staging / "START-FOCUS-TOOLKIT.bat").write_text(START_APP, encoding="utf-8")
-    (staging / "VERSION.txt").write_text(version_text(with_models), encoding="utf-8")
+    write_for_windows(staging / "README-FIRST.txt", readme)
+    write_for_windows(staging / "install-uv.bat", INSTALL_UV)
+    write_for_windows(staging / "first-time-setup.bat", FIRST_RUN)
+    write_for_windows(staging / "START-FOCUS-TOOLKIT.bat", START_APP)
+    write_for_windows(staging / "VERSION.txt", version_text(with_models))
     copied += 5
 
     # Last line of defence: assert nothing forbidden reached the staging folder
