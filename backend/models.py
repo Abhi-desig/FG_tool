@@ -16,6 +16,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import logging
+import os
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -256,6 +257,31 @@ def loaded(key: str) -> Iterator[Any]:
             gc.collect()
 
 
+def _use_stored_token() -> None:
+    """Put the operator's Hugging Face token where `transformers` will find it.
+
+    `huggingface_hub` reads `HF_TOKEN` from the environment, and the only way to
+    set it used to be hand-editing a `.env` on a machine whose operator is not a
+    programmer. It now lives in Settings beside the Gemini key — encrypted at
+    rest by the same code, and never written to a file that could be emailed.
+
+    An environment variable that is already set wins. Somebody who exported
+    `HF_TOKEN` to run one job meant that, and silently overriding it from the
+    database would be the harder failure to explain.
+    """
+    if os.environ.get("HF_TOKEN"):
+        return
+    try:
+        from backend import db
+
+        token = db.get_api_key("HF_TOKEN")
+    except Exception as exc:  # noqa: BLE001 - a missing key is not a crash
+        log.warning("could not read the stored Hugging Face token: %s", exc)
+        return
+    if token:
+        os.environ["HF_TOKEN"] = token
+
+
 def _load_hf(model: ModelSpec) -> tuple[Any, Any]:
     """Load a seq2seq translation model and its tokenizer.
 
@@ -270,6 +296,8 @@ def _load_hf(model: ModelSpec) -> tuple[Any, Any]:
         ) from exc
 
     assert model.repo is not None
+    if model.gated:
+        _use_stored_token()
     try:
         tokenizer = AutoTokenizer.from_pretrained(model.repo)
         net = AutoModelForSeq2SeqLM.from_pretrained(model.repo)
@@ -278,7 +306,8 @@ def _load_hf(model: ModelSpec) -> tuple[Any, Any]:
         if model.gated:
             hint = (
                 f" This repo is gated: accept the terms at "
-                f"https://huggingface.co/{model.repo} and set HF_TOKEN in .env."
+                f"https://huggingface.co/{model.repo} — then put the token in "
+                f"Settings → API keys as Hugging Face."
             )
         raise ModelError(f"could not load {model.key}: {exc}.{hint}") from exc
     net.eval()

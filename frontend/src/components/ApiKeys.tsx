@@ -22,6 +22,9 @@ const LABELS: Record<string, string> = {
   ANTHROPIC_API_KEY: "Anthropic Claude (Excel Malayalam check)",
   FAL_API_KEY: "fal.ai (optional fallback)",
   REPLICATE_API_TOKEN: "Replicate (optional fallback)",
+  // Not a paid key. It unlocks the gated IndicTrans2 repo and nothing else, so
+  // the label says what it is for rather than who issues it.
+  HF_TOKEN: "Hugging Face (only for IndicTrans2)",
 }
 
 /**

@@ -319,3 +319,104 @@ def test_the_named_entry_point_is_the_same_build() -> None:
     assert module.main.__module__ == "package_windows"
     assert not hasattr(module, "TREES"), "the entry point has grown its own file list"
     assert not hasattr(module, "build"), "the entry point has grown its own packer"
+
+
+def test_bundling_the_weights_never_lifts_the_bans_that_matter() -> None:
+    """`--with-models` unbans exactly one directory.
+
+    The weights are excluded by default because they are 2 GB and fetch
+    themselves, not because they are secret. A key or the operator's database
+    is a different question and the answer does not change.
+    """
+    pkg = _load_packager()
+    from pathlib import Path as _Path
+
+    assert pkg.refused(_Path("models/birefnet-general/model.onnx"))
+    assert not pkg.refused(_Path("models/birefnet-general/model.onnx"), True)
+
+    for name in (".env", "data.db", "data.db-wal", "tests/test_ai.py", "x.log"):
+        assert pkg.refused(_Path(name), True), f"{name} escaped with --with-models"
+
+
+def test_the_huggingface_cache_is_flattened_not_doubled(tmp_path: Path) -> None:
+    """A naive copy would follow the symlinks and package 2 GB instead of 1.
+
+    Worse than the size: Windows cannot use a symlink out of a zip — its own
+    extractor writes the link text into a file, which breaks the model. So the
+    snapshots are materialised and `blobs/` is dropped.
+    """
+    pkg = _load_packager()
+    import shutil as _shutil
+
+    # A cache in the shape huggingface_hub builds: real bytes in blobs/, and
+    # snapshots/ as symlinks pointing at them.
+    models = tmp_path / "models" / "hf" / "hub" / "models--x--y"
+    (models / "blobs").mkdir(parents=True)
+    (models / "snapshots" / "abc").mkdir(parents=True)
+    (models / "refs").mkdir()
+    (models / "blobs" / "deadbeef").write_bytes(b"weights" * 1000)
+    (models / "refs" / "main").write_text("abc", encoding="utf-8")
+    (models / "snapshots" / "abc" / "model.bin").symlink_to(models / "blobs" / "deadbeef")
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    original_root = pkg.ROOT
+    try:
+        pkg.ROOT = tmp_path
+        pkg.copy_models(staging)
+    finally:
+        pkg.ROOT = original_root
+
+    packed = staging / "models" / "hf" / "hub" / "models--x--y"
+    snapshot = packed / "snapshots" / "abc" / "model.bin"
+
+    assert snapshot.is_file() and not snapshot.is_symlink(), "Windows cannot follow this"
+    assert snapshot.read_bytes() == b"weights" * 1000, "the bytes did not travel"
+    assert (packed / "refs" / "main").exists(), "from_pretrained resolves refs/main first"
+    assert not (packed / "blobs").exists(), "blobs behind materialised snapshots are dead weight"
+
+    del _shutil
+
+
+def test_files_windows_reads_get_windows_line_endings(tmp_path: Path) -> None:
+    """LF-only breaks two things on the shop PC, quietly.
+
+    `cmd.exe` reads ahead to parse a multi-line `if errorlevel 1 ( ... )` block,
+    and LF endings are a known way to make it mis-handle one — both generated
+    launchers contain exactly that construct, on their error paths, so it would
+    fail only once something else had already gone wrong. And Notepad before
+    Windows 10 1809 renders an LF-only file as a single unbroken line, which
+    README-FIRST.txt is the worst possible candidate for.
+    """
+    pkg = _load_packager()
+    target = tmp_path / "x.bat"
+
+    pkg.write_for_windows(target, "@echo off\nif errorlevel 1 (\n  pause\n)\n")
+    raw = target.read_bytes()
+
+    assert b"\r\n" in raw
+    assert b"\n" not in raw.replace(b"\r\n", b""), "a bare LF survived"
+
+    # Idempotent: text that already has CRLF must not come out as CR CR LF.
+    pkg.write_for_windows(target, "already\r\nCRLF\r\n")
+    assert b"\r\r\n" not in target.read_bytes()
+
+
+def test_the_app_reads_a_style_file_saved_by_notepad(tmp_path, monkeypatch) -> None:
+    """The operator is told they can drop .md style files into the folder.
+
+    On Windows they will do that in Notepad, which writes CRLF. Python's text
+    mode translates it on the way in, so this works — pinned because the front
+    matter is matched with a regex that ends in a literal `\\n`, and it would be
+    easy to "tighten" that into something CRLF breaks silently.
+    """
+    from backend.features import posters
+
+    monkeypatch.setattr(posters, "DESIGNS_DIR", tmp_path)
+    (tmp_path / "notepad.md").write_bytes(
+        b"name: Saved in Notepad\r\naspect: 4:5\r\n---\r\nA 4:5 poster. No watermarks.\r\n"
+    )
+
+    found = posters.designs()
+    assert [d.name for d in found] == ["Saved in Notepad"]
+    assert found[0].aspect == "4:5"

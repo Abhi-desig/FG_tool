@@ -1,0 +1,137 @@
+# The gate, run by a machine instead of from memory.
+#
+# scripts/qc.py is the whole check — ruff, pytest, tsc, oxlint, release. Its
+# docstring opens with the reason it exists: five gates, no CI, run by hand one
+# at a time while the other four drift. This file is the missing half.
+#
+# **Skips are a third state and stay one.** Four of the five gates silently do
+# nothing on an incomplete checkout, and this runner *is* an incomplete
+# checkout by design — no translation engine, no upscaler, no payyans, because
+# downloading a gigabyte of weights on every push would buy minutes of CI time
+# to re-prove something the shop PC already proves. So qc.py's own SKIP rows are
+# lifted into the job summary and raised as warning annotations. A run with
+# skips is green, because nothing is broken, but it never claims to be a full
+# pass — the summary says exactly what did not run.
+#
+# What this does NOT cover, so nobody reads a green tick as more than it is:
+# every exit gate in ROADMAP.md that needs the shop PC, a real print, CorelDRAW,
+# or a real Gemini call.
+
+name: qc
+
+on:
+  push:
+  pull_request:
+
+# A second push to the same branch makes the first run's answer worthless.
+concurrency:
+  group: qc-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  qc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        # Pinned by .python-version (3.13); pyproject requires >=3.13,<3.14.
+        run: uv python install
+
+      - name: Install Python dependencies
+        # --frozen: fail rather than silently resolve something different from
+        # uv.lock. A gate that quietly tests other versions than the shop PC
+        # runs is not testing the shop PC.
+        run: uv sync --frozen
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        # tsc and oxlint both no-op without node_modules, and qc.py reports that
+        # as a SKIP rather than a pass — so this step is what stops two of the
+        # five gates quietly proving nothing.
+        run: npm ci
+        working-directory: frontend
+
+      - name: Run the gate
+        id: gate
+        run: |
+          set -o pipefail
+          uv run python scripts/qc.py 2>&1 | tee qc-output.txt
+        continue-on-error: true
+
+      - name: Report
+        # Always runs, including when the gate failed, because a failed run is
+        # exactly when the summary is worth reading.
+        if: always()
+        run: |
+          # The gate can die before writing anything — a missing uv, a failed
+          # sync. This step runs on always(), so it has to survive that rather
+          # than fail on a file that was never created and bury the real cause.
+          if [ ! -f qc-output.txt ]; then
+            echo "## qc" >> "$GITHUB_STEP_SUMMARY"
+            echo "The gate produced no output — it failed before it could run." >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=qc did not run::No output from scripts/qc.py. See the log."
+            exit 0
+          fi
+
+          # The gate table and verdict: everything from the first result row to
+          # the end. The per-gate output above it is already in the log.
+          #
+          # awk, not `sed -n '/\(A\|B\)/,$p'` — that alternation is a GNU
+          # extension which matches nothing at all on BSD sed, silently, giving
+          # an empty summary. Whichever sed the runner ships with, this reads
+          # the same.
+          table=$(awk '/^(PASS|FAIL|SKIP)  /{found=1} found' qc-output.txt)
+          [ -n "$table" ] || table=$(cat qc-output.txt)
+          {
+            echo "## qc"
+            echo
+            echo '```'
+            echo "$table"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Gate-level skips, lifted out so they are visible without opening the
+          # log. GitHub has no neutral conclusion for an ordinary step, so a
+          # skip is a warning annotation on a green run rather than a colour of
+          # its own — the summary above carries the detail.
+          skipped=$(grep -c '^SKIP  ' qc-output.txt || true)
+          if [ "${skipped:-0}" -gt 0 ]; then
+            echo "**${skipped} gate(s) did not run.** This is not a full pass." >> "$GITHUB_STEP_SUMMARY"
+            grep '^SKIP  ' qc-output.txt | while read -r line; do
+              echo "::warning title=Gate skipped::${line}"
+            done
+          fi
+
+          # Tests skipped *inside* a passing pytest run are a different thing
+          # from a skipped gate, and qc.py already distinguishes them. Carry the
+          # distinction through rather than flattening it here.
+          if grep -q 'were skipped inside the suite' qc-output.txt; then
+            inside=$(grep 'were skipped inside the suite' qc-output.txt | head -1)
+            echo "${inside#      }" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Tests skipped::${inside#      }"
+          fi
+
+      - name: Fail on any gate failure
+        # The gate step is continue-on-error so the summary always gets written;
+        # this is what actually decides the job. Any non-zero from qc.py fails
+        # the build — it exits 1 for a failed gate, and 0 for skips alone.
+        if: steps.gate.outcome == 'failure'
+        run: |
+          echo "::error title=qc failed::One or more gates failed. See the job summary."
+          exit 1

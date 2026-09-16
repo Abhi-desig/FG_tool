@@ -20,8 +20,26 @@ The only part of this app with direct monetary value. Handling rules are in
 | Key | Needed for | Required |
 |---|---|---|
 | `GEMINI_API_KEY` | Phase 5 — photo editing, poster artwork | Yes, for Phase 5 |
+| `ANTHROPIC_API_KEY` | Phase 3 — the Malayalam check on a translated sheet | No |
 | `FAL_API_KEY` | Optional fallback (Qwen-Image-Edit) | No |
 | `REPLICATE_API_TOKEN` | Optional fallback | No |
+| `HF_TOKEN` | Unlocking the gated IndicTrans2 repo. **Not a paid key** | No |
+
+`HF_TOKEN` is here rather than in `.env` for the same reason as the others: the operator is not a
+programmer, and "edit a hidden file next to the app" is not an instruction a shop can follow. It is
+a live credential on somebody's Hugging Face account, so it is held exactly as tightly as the paid
+ones — encrypted at rest, only a 4-character hint ever leaves the server, and it is never written to
+a file that could be emailed.
+
+`backend/models.py` copies it into `HF_TOKEN` in the environment before loading a gated model,
+because that is the only place `huggingface_hub` looks. **An exported `HF_TOKEN` wins** — somebody
+who set one for a single run meant it, and silently preferring the database would be the harder
+failure to explain.
+
+**A token alone does not make IndicTrans2 work.** The repo also has to be accepted on Hugging Face
+under that account, and `translate` and `indictrans` pin different `transformers` majors and are
+declared conflicting in `pyproject.toml`, so the two engines can never be installed side by side.
+See ADR-017.
 
 ### Behaviour
 
