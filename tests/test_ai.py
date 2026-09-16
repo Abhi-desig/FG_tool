@@ -13,6 +13,7 @@ spend.
 from __future__ import annotations
 
 import json
+import os
 from hashlib import sha256
 from typing import Any
 
@@ -658,3 +659,69 @@ def test_the_hash_recorded_for_the_retired_concept_prompt_is_a_real_one() -> Non
         assert scope in prompts.SCOPE_KEYS, f"{scope} is not a live scope"
         for digest in digests:
             assert len(digest) == 64 and set(digest) <= set("0123456789abcdef")
+
+
+# --- the Hugging Face token (gated models) ---------------------------------
+
+
+def test_the_hugging_face_token_is_stored_like_any_other_key() -> None:
+    """Encrypted at rest, and only its last four characters ever come back out.
+
+    It is not a paid key, but it is a live credential on the operator's Hugging
+    Face account, and "it only unlocks a model repo" is not a reason to hold it
+    more loosely than the ones that cost money.
+    """
+    db.set_api_key("HF_TOKEN", "hf_thisisnotarealtokenatall")
+    with db.cursor() as cur:
+        row = cur.execute(
+            "SELECT ciphertext, hint FROM api_keys WHERE name = 'HF_TOKEN'"
+        ).fetchone()
+
+    assert b"hf_thisisnotarealtokenatall" not in row["ciphertext"]
+    assert row["hint"] == "…tall"
+    assert json.dumps(db.list_api_keys()).count("hf_thisisnotarealtokenatall") == 0
+    assert db.get_api_key("HF_TOKEN") == "hf_thisisnotarealtokenatall"
+
+
+def test_a_stored_token_reaches_transformers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """huggingface_hub reads HF_TOKEN from the environment and nowhere else.
+
+    Before this, the only way to set it was hand-editing a `.env` beside the app
+    — on a machine whose operator is not a programmer.
+    """
+    from backend import models as model_store
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    db.set_api_key("HF_TOKEN", "hf_from_the_settings_screen")
+
+    model_store._use_stored_token()
+
+    assert os.environ["HF_TOKEN"] == "hf_from_the_settings_screen"
+
+
+def test_an_exported_token_is_not_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Somebody who exported HF_TOKEN for one job meant it.
+
+    Silently preferring the database would be the harder failure to explain, and
+    it is the one that happens at 9pm before a deadline.
+    """
+    from backend import models as model_store
+
+    monkeypatch.setenv("HF_TOKEN", "hf_exported_for_this_run")
+    db.set_api_key("HF_TOKEN", "hf_stored_in_settings")
+
+    model_store._use_stored_token()
+
+    assert os.environ["HF_TOKEN"] == "hf_exported_for_this_run"
+
+
+def test_no_stored_token_is_not_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The overwhelmingly common case: nobody has ever set one."""
+    from backend import models as model_store
+
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    db.delete_api_key("HF_TOKEN")
+
+    model_store._use_stored_token()  # must not raise
+
+    assert "HF_TOKEN" not in os.environ

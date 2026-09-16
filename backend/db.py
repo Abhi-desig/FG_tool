@@ -641,6 +641,13 @@ KEY_NAMES = (
     "ANTHROPIC_API_KEY",
     "FAL_API_KEY",
     "REPLICATE_API_TOKEN",
+    # Not a paid key, and it buys nothing on its own — it unlocks a *gated*
+    # Hugging Face repo, which is IndicTrans2's only door. Stored here rather
+    # than in `.env` for the same reason as the others: the operator is not a
+    # programmer, and "edit a hidden file next to the app" is not an
+    # instruction, while a field in Settings is. Encrypted at rest by the same
+    # code, and never written anywhere that could be emailed.
+    "HF_TOKEN",
 )
 
 
