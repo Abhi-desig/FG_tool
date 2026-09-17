@@ -936,6 +936,71 @@ still renders. Designs are files, not rows, so the operator edits them in any
 text editor and a new one needs no restart. No new dependency. Phase 5's exit
 gate is unchanged and still unmet: one real call has still never been made.
 
+## ADR-038 · The shop PC gets an installer, and it installs per-user
+
+**Date:** 2026-09-17
+**Amends:** ARCHITECTURE.md's deployment contract.
+**Context:** The operator's route to a working tool was: unzip to exactly the
+right folder, run `install-uv.bat`, run `first-time-setup.bat` and wait 10-20
+minutes for 4 GB, then run `START-FOCUS-TOOLKIT.bat`. Three terminal windows and
+an unzip step with two documented ways to go wrong, aimed at somebody who is not
+a programmer. ARCHITECTURE.md's promise that "the shop PC installs Python and
+nothing else" was met, but the thing it cost was the person using it.
+
+**Decision.** Ship one `FocusToolkit-Setup.exe`, built on a `windows-latest`
+runner, containing the app, a Python runtime, every library and all four model
+weights. Double-click, Next, desktop icon. Nothing downloads at install time or
+on first run.
+
+**Per-user, and that is the load-bearing decision.** `%LOCALAPPDATA%\Programs\
+FocusToolkit` rather than `Program Files`. It avoids the admin prompt, but the
+real reason is that it is **writable**. An inventory of every disk write in
+`backend/` found seven things that break under `Program Files`: `WORK_DIR` is
+wiped and recreated on every boot (`main.py:128-130`), `db.init()` creates
+`data.db` with its WAL siblings (`db.py:208-211`), model downloads land in
+`MODELS_DIR` (`models.py:202`), rembg and HuggingFace write there too, and —
+worst — `translit.py:371-381` appends every learned name back into its own
+shipped data files and **catches `OSError` to log a warning**, so that one fails
+silently and learning just stops working.
+
+Installing per-user makes all seven non-problems. **No backend path moved and no
+backend code changed.** The alternative was relocating five paths to
+`%LOCALAPPDATA%`, an ADR of its own, and a new class of bug in the one module
+that fails quietly.
+
+**Upgrades protect the operator's work over ours.** `data/names/exceptions.tsv`
+and `data/places/gazetteer.tsv` are shipped content that the app appends to, so
+the installer marks them `onlyifdoesntexist` and excludes them from the wildcard
+copy. The cost is real and accepted: new entries we ship do not reach an
+existing install. Losing months of the operator's own corrections is the worse
+of the two losses. `data.db` is created at runtime, so it is not an installed
+file — it survives upgrades and is deliberately left behind on uninstall.
+
+**The risk this carries.** A bundled environment that holds an absolute path
+anywhere works on the runner and dies on the shop PC. So the build copies a
+standalone Python distribution rather than a virtualenv (a venv keeps its base
+interpreter's absolute path in `pyvenv.cfg`), and the workflow **moves the staged
+folder and starts the server from the new location** before the installer is
+compiled. A relocation fault becomes a failed build rather than a failed
+installation.
+
+**Consequences.** `package_windows.py` gains `--for-installer`, which implies
+`--with-models` and `--staging-only` and swaps the three uv-era buttons for a
+launcher and a self-check that use the bundled runtime — an installed folder
+containing `install-uv.bat` would be shipping a button that breaks a working
+install. New: `scripts/fetch_models.py` (a build runner has no weights and no
+reason to run an image job), `installer/focus-toolkit.iss`,
+`.github/workflows/installer.yml`. The installer is **not signed**: Windows shows
+"Windows protected your PC" once, and the read-me says to click through it.
+
+The zip route is kept, not replaced. It is the only thing that works for anyone
+without Windows, and it is what the 2 MB emailable package is for.
+
+**Not proved.** Nothing here has run on Windows. The workflow is written from
+documentation and inspection, `ISCC.exe` has never been invoked from this repo,
+and the relocation smoke test has never executed. The first tagged build is the
+experiment, and it should be treated as one.
+
 ## ADR-037 · The model chooses the style, in the call that draws
 
 **Date:** 2026-09-08

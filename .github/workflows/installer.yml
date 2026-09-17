@@ -1,0 +1,184 @@
+# The Windows installer the shop PC actually gets.
+#
+# This is the only job in the repo that runs on Windows, and that is not
+# incidental: torch, onnxruntime and scipy ship platform-specific compiled
+# wheels, so a Windows environment can only be assembled on Windows. It also
+# means this is the first and only place the 728-test suite runs on the
+# operating system the tool is for.
+#
+# What comes out is one FocusToolkit-Setup.exe containing the app, a Python
+# runtime, every library and all four model weights. The operator double-clicks
+# it and gets a desktop icon. Nothing downloads, at install time or on first
+# run. See ADR-038.
+#
+# Not signed. Windows will show "Windows protected your PC" once, and
+# README-FIRST.txt says to click More info then Run anyway.
+
+name: installer
+
+on:
+  # Tags only. This job downloads ~2 GB of weights and produces a ~3 GB
+  # artifact; running it on every push would be neither cheap nor useful.
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    # The gate, a 2 GB model fetch and a 3 GB compile. Generous on purpose: a
+    # timeout that fires halfway leaves no artifact and no useful diagnosis.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Install Python dependencies
+        run: uv sync --frozen
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        # node_modules only. `frontend/dist` is deliberately NOT rebuilt here:
+        # it is committed, and the release gate inside qc.py verifies it matches
+        # the source it was built from. Rebuilding would make that check compare
+        # this runner against itself and prove nothing.
+        run: npm ci
+        working-directory: frontend
+
+      - name: Cache the model weights
+        # ~2 GB. Keyed on the registry that defines them, so a new or changed
+        # model busts the cache and anything else reuses it.
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: models-${{ runner.os }}-${{ hashFiles('backend/models.py') }}
+
+      - name: Fetch the model weights
+        run: uv run python scripts/fetch_models.py
+
+      - name: Stage the application
+        # Runs the full gate first and refuses to stage over a failure. This is
+        # where the test suite meets Windows for the first time.
+        run: uv run python scripts/package_windows.py --for-installer
+
+      - name: Bundle a Python runtime
+        shell: pwsh
+        run: |
+          $staging = "dist/focus-toolkit-shop"
+
+          # A standalone Python distribution, copied whole. Not a virtualenv:
+          # a venv keeps an absolute path to its base interpreter in
+          # pyvenv.cfg, which is exactly the thing that breaks when the folder
+          # is installed somewhere else. These builds are relocatable by
+          # design, which is the property this whole step needs.
+          # Not $home: PowerShell reserves that as a read-only automatic
+          # variable, and assigning to it fails the step outright.
+          $python = uv python find 3.13
+          $runtimeHome = Split-Path -Parent $python
+          Write-Host "Copying runtime from $runtimeHome"
+          Copy-Item -Recurse -Force $runtimeHome "$staging/runtime"
+
+          # Install into that runtime's own site-packages, from the lockfile,
+          # so the shop PC gets the versions CI tested rather than whatever
+          # resolved today. --no-dev: pytest and ruff are not the shop's
+          # business and would add weight for nothing.
+          uv export --frozen --no-dev `
+            --extra images --extra translate --extra ai `
+            --format requirements-txt -o requirements-shop.txt
+
+          $runtimeExe = Get-ChildItem -Path "$staging/runtime" -Filter python.exe -Recurse |
+                        Select-Object -First 1
+          Write-Host "Installing into $($runtimeExe.FullName)"
+          uv pip install --python $runtimeExe.FullName -r requirements-shop.txt
+
+      - name: Prove the folder still works somewhere else
+        shell: pwsh
+        # The one risk this whole approach carries. If anything in the runtime
+        # holds an absolute path, the app works on this runner and dies on the
+        # shop PC. Moving it first turns that into a failed build instead of a
+        # failed installation.
+        run: |
+          $moved = "$env:RUNNER_TEMP/relocated"
+          Move-Item "dist/focus-toolkit-shop" $moved
+
+          $py = Get-ChildItem -Path "$moved/runtime" -Filter python.exe -Recurse |
+                Select-Object -First 1
+          $server = Start-Process -FilePath $py.FullName `
+            -ArgumentList "-m","backend.main" -WorkingDirectory $moved `
+            -PassThru -NoNewWindow
+          try {
+            $ok = $false
+            foreach ($attempt in 1..30) {
+              Start-Sleep -Seconds 2
+              try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/api/features" `
+                       -UseBasicParsing -TimeoutSec 5
+                if ($r.StatusCode -eq 200) { $ok = $true; break }
+              } catch { }
+            }
+            if (-not $ok) { throw "the relocated app never answered on 127.0.0.1:8000" }
+            Write-Host "OK    the relocated folder serves /api/features"
+          } finally {
+            if (-not $server.HasExited) { Stop-Process -Id $server.Id -Force }
+          }
+          Move-Item $moved "dist/focus-toolkit-shop"
+        env:
+          # Nothing should open a browser on a build runner.
+          OPEN_BROWSER: "false"
+
+      - name: Compile the installer
+        shell: pwsh
+        # Inno Setup ships on the windows-latest image. Installed explicitly
+        # rather than assumed: a silent absence here would fail with something
+        # far less obvious than "the compiler is missing".
+        run: |
+          if (-not (Get-Command ISCC.exe -ErrorAction SilentlyContinue)) {
+            Write-Host "Inno Setup not on PATH — installing it"
+            choco install innosetup --no-progress -y
+            $env:PATH += ";C:\Program Files (x86)\Inno Setup 6"
+          }
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if (-not $version) { $version = "0.0.0" }
+          & ISCC.exe /DStagingDir="$(Resolve-Path dist/focus-toolkit-shop)" `
+                     /DAppVersion="$version" installer/focus-toolkit.iss
+
+      - name: Report what was built
+        shell: pwsh
+        run: |
+          $exe = Get-Item dist/FocusToolkit-Setup.exe
+          $size = "{0:N2} GB" -f ($exe.Length / 1GB)
+          "## Windows installer"                              >> $env:GITHUB_STEP_SUMMARY
+          ""                                                  >> $env:GITHUB_STEP_SUMMARY
+          "| | |"                                             >> $env:GITHUB_STEP_SUMMARY
+          "|---|---|"                                         >> $env:GITHUB_STEP_SUMMARY
+          "| File | ``$($exe.Name)`` |"                       >> $env:GITHUB_STEP_SUMMARY
+          "| Size | $size |"                                  >> $env:GITHUB_STEP_SUMMARY
+          "| Commit | ``${{ github.sha }}`` |"                >> $env:GITHUB_STEP_SUMMARY
+          ""                                                  >> $env:GITHUB_STEP_SUMMARY
+          "Installs per-user to ``%LOCALAPPDATA%\Programs\FocusToolkit``. No admin needed." >> $env:GITHUB_STEP_SUMMARY
+          "Unsigned, so Windows shows *Windows protected your PC* once — More info, Run anyway." >> $env:GITHUB_STEP_SUMMARY
+          Get-Content dist/focus-toolkit-shop/VERSION.txt     >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FocusToolkit-Setup
+          path: dist/FocusToolkit-Setup.exe
+          # Big artefact, and a tagged build is reproducible from the tag.
+          retention-days: 14
+          compression-level: 0

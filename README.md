@@ -172,14 +172,28 @@ git add -f frontend/dist
 uv run python scripts/package_windows.py
 ```
 
-That writes `dist/FocusToolkit-windows.zip`. Copy it over, unzip it, and open
-`START-HERE.txt` — it walks the operator through installing uv, the one-off
-`first-time-setup.bat`, and then `start.bat` from then on.
+That writes `dist/focus-toolkit-shop.zip` (~2 MB). Copy it over, unzip it, and
+open `README-FIRST.txt` — it walks the operator through installing uv, the
+one-off `first-time-setup.bat`, and then `START-FOCUS-TOOLKIT.bat` from then on.
 
-The package deliberately contains **no** `.env`, no `*.db` and no `models/`:
-API keys are typed into Settings on that machine, the database is created on
-first run, and the model weights download on first use. Packaging refuses to
-run if `frontend/dist` is stale, for the same reason `check_release.py` exists.
+Three ways to build it, depending on where it is going:
+
+```bash
+uv run python scripts/build_shop_zip.py                  # ~2 MB, emailable
+uv run python scripts/build_shop_zip.py --with-models     # ~1.9 GB, nothing downloads
+uv run python scripts/package_windows.py --for-installer  # staged for the installer
+```
+
+`--with-models` bundles all four weights for a shop PC on a slow connection.
+`--for-installer` stages the folder the Windows installer is built from — see
+`.github/workflows/installer.yml`, which produces `FocusToolkit-Setup.exe` on a
+`windows-latest` runner. The installer is the route the operator should get
+(ADR-038); the zip is what works for anyone without Windows.
+
+The package deliberately contains **no** `.env` and no `*.db`: API keys are
+typed into Settings on that machine, and the database is created on first run.
+Packaging runs the whole `qc.py` gate first and refuses over a failure, because
+a package is the one artefact nobody re-runs anything against.
 
 **Run the check before every push.** It fails when the committed bundle is not the built one, which
 is not hypothetical: `519de89` changed ~2,000 lines of frontend and never re-added `dist`, so the

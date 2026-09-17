@@ -28,6 +28,8 @@ is wrong in it stays wrong until a client sees it.
 
     uv run python scripts/package_windows.py
     uv run python scripts/package_windows.py --with-models
+    uv run python scripts/package_windows.py --with-models --staging-only
+    uv run python scripts/package_windows.py --for-installer   # implies both
 
 Exit codes: 0 built, 1 the gate failed or the UI is not built, 2 the script
 could not run from here.
@@ -370,7 +372,132 @@ def git(*args: str) -> str | None:
     return done.stdout if done.returncode == 0 else None
 
 
-def build(with_models: bool = False) -> int:
+
+# --- installed-app variants -------------------------------------------------
+#
+# The zip and the installer are the same application with two different front
+# doors. The zip's operator installs uv and runs `uv sync`; the installer's
+# operator gets a folder that already contains a Python runtime, so none of
+# that applies and shipping it would be three dead buttons.
+
+INSTALLED_LAUNCHER = """@echo off
+REM Focus Toolkit. Started by the desktop icon; safe to double-click directly.
+cd /d "%~dp0"
+title Focus Toolkit - keep this window open
+echo Starting the Focus Toolkit.
+echo Your browser will open in a few seconds.
+echo.
+echo KEEP THIS BLACK WINDOW OPEN while you use the toolkit.
+echo Closing it stops the toolkit.
+echo.
+REM The bundled runtime, not a system Python. Nothing here depends on anything
+REM being installed on this machine.
+REM
+REM Two candidate paths on purpose: a standalone Python distribution puts
+REM python.exe at its root, a virtualenv puts it under Scripts\\. Which one the
+REM build produced is a detail of the build, and a launcher that only knows one
+REM of them turns a packaging change into a dead desktop icon.
+set "FT_PY=%~dp0runtime\\python.exe"
+if not exist "%FT_PY%" set "FT_PY=%~dp0runtime\\Scripts\\python.exe"
+if not exist "%FT_PY%" (
+  echo The bundled Python is missing from this folder.
+  echo The installation is incomplete - install it again.
+  pause
+  exit /b 1
+)
+"%FT_PY%" -m backend.main
+if errorlevel 1 (
+  echo.
+  echo The toolkit could not start.
+  echo Send VERSION.txt and anything in red above to whoever set this up.
+  pause
+)
+"""
+
+INSTALLED_CHECK = """@echo off
+REM Focus Toolkit - AI self-check.
+REM Run this when the AI features fail. It says whether the fault is this
+REM computer or the API key. Costs nothing.
+cd /d "%~dp0"
+set "FT_PY=%~dp0runtime\\python.exe"
+if not exist "%FT_PY%" set "FT_PY=%~dp0runtime\\Scripts\\python.exe"
+if not exist "%FT_PY%" (
+  echo The bundled Python is missing from this folder.
+  pause
+  exit /b 1
+)
+"%FT_PY%" -m backend.diagnose
+echo.
+pause
+"""
+
+INSTALLED_README = """FOCUS TOOLKIT
+=============
+
+It is already installed. Double-click the Focus Toolkit icon on your desktop.
+
+A black window opens, then your web browser opens with the toolkit in it. That
+is the app.
+
+
+TO CLOSE IT
+-----------
+Close the black window. Closing only the browser leaves it running in the
+background.
+
+
+THE FIRST START IS SLOW
+-----------------------
+The very first time you open it after installing, Windows checks the whole
+folder for viruses. That can take a minute or two. It only happens once.
+
+
+TWO THINGS THAT LOOK WRONG BUT ARE NOT
+--------------------------------------
+* REMOVING A BACKGROUND OR ENLARGING A PICTURE TAKES 2 TO 3 MINUTES PER
+  IMAGE. That is normal. It is doing real work on this computer rather than
+  sending your client's photo to a website. The screen shows which step it is
+  on and how long it has been going. Nothing is downloaded - everything it
+  needs was installed with it.
+
+* THE RUPEE FIGURE ON SCREEN IS AN ESTIMATE, NOT A BILL. The AI features show
+  roughly what they have cost this month. It is close, but the real number is
+  the one on Google's own billing page. Treat the figure here as a warning
+  light, not an invoice.
+
+
+IF THE AI FEATURES DO NOT WORK
+------------------------------
+Double-click check-ai.bat in this folder. It tells you whether the problem is
+this computer or the API key, and costs nothing to run.
+
+
+THINGS WORTH KNOWING
+--------------------
+* Nothing leaves this computer except the features that say so on screen
+  before they run: the Malayalam check in the Excel translator, and the poster
+  screen. Everything else works with the internet unplugged.
+
+* Your clients, your glossary and your remembered corrections are stored in a
+  file called data.db in this folder. It is created the first time you run the
+  app, and it is NOT removed if you uninstall. Copy it if you move to another
+  computer.
+
+* API keys are typed into the Settings screen, not into any file here.
+
+* Malayalam written into a poster picture by the AI is often misspelled. Read
+  every word on a poster against what you typed before printing it.
+
+* VERSION.txt says exactly which build this is. If you report a problem, send
+  that file with it.
+"""
+
+
+def build(
+    with_models: bool = False,
+    staging_only: bool = False,
+    for_installer: bool = False,
+) -> int:
     index = ROOT / "frontend" / "dist" / "index.html"
     if not index.exists():
         print("FAIL  frontend/dist is not built — the package would serve a blank app.")
@@ -428,6 +555,12 @@ def build(with_models: bool = False) -> int:
         source = ROOT / name
         if not source.exists():
             continue
+        # The repo's check-ai.bat runs `uv run ...`, and the installed app has
+        # no uv. README-FIRST tells the operator to double-click it, so leaving
+        # the uv version in would be a button that fails exactly when something
+        # is already wrong. Replaced below, not merely dropped.
+        if for_installer and name == "check-ai.bat":
+            continue
         if source.suffix.lower() in WINDOWS_TEXT:
             write_for_windows(staging / name, source.read_text(encoding="utf-8"))
         else:
@@ -450,12 +583,22 @@ def build(with_models: bool = False) -> int:
             "  close it. Everything it needs is already in this folder, so there\n"
             "  is nothing to download and no wait beyond the work itself.",
         )
-    write_for_windows(staging / "README-FIRST.txt", readme)
-    write_for_windows(staging / "install-uv.bat", INSTALL_UV)
-    write_for_windows(staging / "first-time-setup.bat", FIRST_RUN)
-    write_for_windows(staging / "START-FOCUS-TOOLKIT.bat", START_APP)
-    write_for_windows(staging / "VERSION.txt", version_text(with_models))
-    copied += 5
+    if for_installer:
+        # No uv, no `uv sync`, no unzip instructions: the installer has already
+        # done all three. Shipping those buttons would be shipping three things
+        # that either do nothing or actively break a working install.
+        write_for_windows(staging / "README-FIRST.txt", INSTALLED_README)
+        write_for_windows(staging / "FocusToolkit.bat", INSTALLED_LAUNCHER)
+        write_for_windows(staging / "check-ai.bat", INSTALLED_CHECK)
+        write_for_windows(staging / "VERSION.txt", version_text(with_models))
+        copied += 4
+    else:
+        write_for_windows(staging / "README-FIRST.txt", readme)
+        write_for_windows(staging / "install-uv.bat", INSTALL_UV)
+        write_for_windows(staging / "first-time-setup.bat", FIRST_RUN)
+        write_for_windows(staging / "START-FOCUS-TOOLKIT.bat", START_APP)
+        write_for_windows(staging / "VERSION.txt", version_text(with_models))
+        copied += 5
 
     # Last line of defence: assert nothing forbidden reached the staging folder
     # before it is sealed into a zip somebody will email.
@@ -463,6 +606,14 @@ def build(with_models: bool = False) -> int:
         if path.is_file() and refused(path.relative_to(staging), with_models):
             print(f"FAIL  {path.relative_to(staging)} must never be packaged.")
             return 1
+
+    if staging_only:
+        # The installer build consumes the folder directly. Zipping two
+        # gigabytes so Inno Setup can immediately unzip it again costs about
+        # ten minutes a build and proves nothing.
+        print(f"OK    {shown_path(staging)} — {copied} files, {size_of(staging) / 1e9:.2f} GB")
+        print("      Staged only, not zipped. Point the installer at that folder.")
+        return 0
 
     archive = OUT_DIR / (f"{NAME}-complete.zip" if with_models else f"{NAME}.zip")
     if archive.exists():
@@ -485,6 +636,14 @@ def build(with_models: bool = False) -> int:
     return 0
 
 
+def shown_path(path: Path) -> str:
+    """Repo-relative if it can be, absolute otherwise."""
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def size_of(folder: Path) -> int:
     return sum(f.stat().st_size for f in folder.rglob("*") if f.is_file())
 
@@ -493,7 +652,16 @@ def main() -> int:
     if not (ROOT / "pyproject.toml").exists():
         print("FAIL  run this from the repo.")
         return 2
-    return build(with_models="--with-models" in sys.argv[1:])
+    flags = sys.argv[1:]
+    installer = "--for-installer" in flags
+    # The installer only makes sense as a complete, staged folder: it is
+    # consumed directly by Inno Setup, and an installed app that downloads its
+    # own weights on first use is the thing this whole route exists to stop.
+    return build(
+        with_models="--with-models" in flags or installer,
+        staging_only="--staging-only" in flags or installer,
+        for_installer=installer,
+    )
 
 
 if __name__ == "__main__":

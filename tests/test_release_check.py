@@ -420,3 +420,74 @@ def test_the_app_reads_a_style_file_saved_by_notepad(tmp_path, monkeypatch) -> N
     found = posters.designs()
     assert [d.name for d in found] == ["Saved in Notepad"]
     assert found[0].aspect == "4:5"
+
+
+# --- the installer package (ADR-038) ---------------------------------------
+
+
+def test_the_installed_app_never_calls_uv() -> None:
+    """The installer bundles a Python runtime; uv is not on that machine.
+
+    Both generated scripts have to reach it through the bundled runtime. A
+    leftover `uv run` is a button that fails at exactly the moment something is
+    already wrong — check-ai.bat is what README-FIRST tells the operator to
+    double-click when the AI features misbehave.
+    """
+    pkg = _load_packager()
+
+    for name, script in (
+        ("FocusToolkit.bat", pkg.INSTALLED_LAUNCHER),
+        ("check-ai.bat", pkg.INSTALLED_CHECK),
+    ):
+        assert "uv run" not in script, f"{name} still shells out to uv"
+        assert "runtime" in script, f"{name} does not use the bundled runtime"
+        # Both runtime layouts, because which one the build produces is a
+        # detail of the build and a launcher that knows only one of them turns
+        # a packaging change into a dead desktop icon.
+        assert r"runtime\python.exe" in script
+        assert r"runtime\Scripts\python.exe" in script
+
+
+def test_the_installed_readme_does_not_describe_steps_that_are_done() -> None:
+    """It is the first thing the operator opens, and it must match reality.
+
+    The zip's README walks through installing uv and running a 20-minute
+    setup. In the installed app all of that has already happened, and telling
+    somebody to do it again is how a working install gets broken.
+    """
+    pkg = _load_packager()
+    readme = pkg.INSTALLED_README
+
+    for gone in ("install-uv.bat", "first-time-setup.bat", "uv sync", "Unzip"):
+        assert gone not in readme, f"the installed README still mentions {gone}"
+    assert "Double-click the Focus Toolkit icon" in readme
+    # The two claims that stop support calls, both still made.
+    assert "2 TO 3 MINUTES" in readme
+    assert "ESTIMATE, NOT A BILL" in readme
+    # And the one that is only true for this build.
+    assert "Nothing is downloaded" in readme
+
+
+def test_the_inno_script_protects_what_the_operator_taught_it() -> None:
+    """`translit.py` appends learned names into two shipped data files.
+
+    A plain upgrade overwrites installed files, which would silently delete
+    every name and place the operator has corrected. Those two need
+    `onlyifdoesntexist`, and the wildcard copy must exclude them or it would
+    overwrite them first and make the flag pointless.
+    """
+    iss = (ROOT / "installer" / "focus-toolkit.iss").read_text(encoding="utf-8")
+
+    for learned in ("exceptions.tsv", "gazetteer.tsv"):
+        assert "Excludes:" in iss and learned in iss
+        assert iss.count(learned) >= 2, f"{learned} needs both an exclude and a guarded copy"
+    assert iss.count("onlyifdoesntexist") == 2
+
+    # Per-user, which is the reason no backend path had to move.
+    assert "PrivilegesRequired=lowest" in iss
+    assert r"{localappdata}\Programs\FocusToolkit" in iss
+
+    # data.db must not be in UninstallDelete: uninstalling to fix a problem
+    # must not destroy the operator's clients, glossary and corrections.
+    uninstall = iss.split("[UninstallDelete]")[1]
+    assert "data.db" not in uninstall.split(";")[0]
